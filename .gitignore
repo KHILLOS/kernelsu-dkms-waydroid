@@ -1,0 +1,32 @@
+# Build artifacts
+*.ko
+*.ko.xz
+*.mod
+*.mod.cmd
+*.o
+*.o.cmd
+*.symvers
+Module.symvers
+modules.order
+
+# DKMS build directories
+/var/lib/dkms/
+/usr/src/kernelsu-*/
+
+# Temporary files
+*.tmp
+*.log
+.tmp/
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Kernel source (downloaded by fetch script)
+kernelsu/

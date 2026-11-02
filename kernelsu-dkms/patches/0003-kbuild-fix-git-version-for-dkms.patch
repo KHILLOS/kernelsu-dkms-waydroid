@@ -1,0 +1,81 @@
+diff --git a/Kbuild b/Kbuild
+index 6c92a01..e9ec31a 100644
+--- a/Kbuild
++++ b/Kbuild
+@@ -60,6 +60,12 @@ ifdef KBUILD_EXTMOD
+ ifeq ($(CONFIG_KSU_DISABLE_MANAGER),y)
+ ccflags-y += -DCONFIG_KSU_DISABLE_MANAGER=1
+ endif
++ifeq ($(CONFIG_KSU_NON_ANDROID),y)
++ccflags-y += -DCONFIG_KSU_NON_ANDROID=1
++endif
++ifeq ($(CONFIG_KSU_SELINUX),y)
++ccflags-y += -DCONFIG_KSU_SELINUX=1
++endif
+ ifeq ($(CONFIG_KSU_DISABLE_POLICY),y)
+ ccflags-y += -DCONFIG_KSU_DISABLE_POLICY=1
+ endif
+@@ -72,7 +78,11 @@ endif
+ endif
+ 
+ ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include
++ifeq ($(CONFIG_KSU_SELINUX),y)
++ccflags-y += -I$(objtree)/security/selinux
++else
+ ccflags-y += -I$(objtree)/security/selinux -include $(srctree)/include/uapi/asm-generic/errno.h
++endif
+ 
+ ifneq ($(KBUILD_EXTMOD),)
+ # 6.18 exports the external module source as srcroot when M/MO are used.
+@@ -96,24 +106,34 @@ MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+ 
+ # Workaround bazel
+ # https://github.com/tiann/KernelSU/pull/316#issuecomment-1479043219
+-GIT := $(shell PATH="$$PATH":/usr/bin:/usr/local/bin which git)
+-ifneq ($(GIT),)
+-# Check if this is a git repository
+-# Try to detect Git repo intelligently
+-GIT_ROOT := $(shell cd $(MDIR) && $(GIT) rev-parse --show-toplevel 2>/dev/null)
+-ifneq ($(GIT_ROOT),)
+-KERNEL_GIT_ROOT := $(shell cd $(srctree) && $(GIT) rev-parse --show-toplevel 2>/dev/null)
+-ifneq ($(GIT_ROOT),$(KERNEL_GIT_ROOT))
+-# Only set version if it's a different repo from kernel
+-$(shell cd $(GIT_ROOT) && [ -f .git/shallow ] && $(GIT) fetch --unshallow 2>/dev/null || true)
+-KSU_GIT_VERSION := $(shell cd $(GIT_ROOT) && $(GIT) rev-list --count HEAD 2>/dev/null)
+-KSU_GIT_VERSION_VALID := 1
+-$(info -- KernelSU: Git repo detected at $(GIT_ROOT))
+-endif
+-endif
+-else
+-$(warning -- KernelSU: Git not detected, make sure git is installed in your PATH!)
++# GIT := $(shell PATH="$$PATH":/usr/bin:/usr/local/bin which git)
++# ifneq ($(GIT),)
++# # Check if this is a git repository
++# # Try to detect Git repo intelligently
++# GIT_ROOT := $(shell cd $(MDIR) && $(GIT) rev-parse --show-toplevel 2>/dev/null)
++# ifneq ($(GIT_ROOT),)
++# KERNEL_GIT_ROOT := $(shell cd $(srctree) && $(GIT) rev-parse --show-toplevel 2>/dev/null)
++# ifneq ($(GIT_ROOT),$(KERNEL_GIT_ROOT))
++# # Only set version if it's a different repo from kernel
++# $(shell cd $(GIT_ROOT) && [ -f .git/shallow ] && $(GIT) fetch --unshallow 2>/dev/null || true)
++# KSU_GIT_VERSION := $(shell cd $(GIT_ROOT) && $(GIT) rev-list --count HEAD 2>/dev/null)
++# KSU_GIT_VERSION_VALID := 1
++# $(info -- KernelSU: Git repo detected at $(GIT_ROOT))
++# endif
++# endif
++# else
++# $(warning -- KernelSU: Git not detected, make sure git is installed in your PATH!)
++# endif
++
++# Git version detection disabled for DKMS builds
++# DKMS builds in /usr/src/ which is not a git repository
++# Version is provided via dkms.conf MAKE directive: KSU_GIT_VERSION=<count>
++# See: https://github.com/tiann/KernelSU/pull/316#issuecomment-1479043219
++# For DKMS, KSU_GIT_VERSION is passed via command line
++ifndef KSU_GIT_VERSION
++KSU_GIT_VERSION := 0
+ endif
++KSU_GIT_VERSION_VALID := 1
+ 
+ 
+ # Calculate version if git version is available

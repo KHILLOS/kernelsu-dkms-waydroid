@@ -1,0 +1,41 @@
+diff --git a/infra/file_wrapper.c b/infra/file_wrapper.c
+index 7372df0..cbafaa5 100644
+--- a/infra/file_wrapper.c
++++ b/infra/file_wrapper.c
+@@ -1,6 +1,7 @@
+ #include <linux/gfp.h>
+ #include <linux/fdtable.h>
+ #include <linux/export.h>
++#include <linux/module.h>
+ #include <linux/anon_inodes.h>
+ #include <linux/capability.h>
+ #include <linux/cred.h>
+@@ -13,11 +14,12 @@
+ #include <linux/version.h>
+ #include <linux/mount.h>
+ 
+-#include "objsec.h"
+ 
+ #include "ksu.h"
+ #include "klog.h" // IWYU pragma: keep
++#ifdef CONFIG_KSU_SELINUX
+ #include "selinux/selinux.h"
++#endif
+ 
+ #include "infra/file_wrapper.h"
+ 
+@@ -536,12 +538,14 @@ int ksu_install_file_wrapper(int fd)
+     struct inode *wrapper_inode = file_inode(wrapper_file);
+     // libc's stdio relies on the fstat() result of the fd to determine its buffer type.
+     wrapper_inode->i_mode = file_inode(orig_file)->i_mode;
++#ifdef CONFIG_KSU_SELINUX
+     struct inode_security_struct *wrapper_sec = selinux_inode(wrapper_inode);
+     // Use ksu_file_sid to bypass SELinux check.
+     // When we call `su` from terminal app, this is useful.
+     if (wrapper_sec) {
+         wrapper_sec->sid = ksu_file_sid;
+     }
++#endif
+     // Install open file operation for inode.
+     wrapper_inode->i_fop = &ksu_file_wrapper_inode_fops;
+ 
