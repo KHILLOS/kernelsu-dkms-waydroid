@@ -1,7 +1,7 @@
-diff --git a/Kconfig b/Kconfig
+diff --git a/kernel/Kconfig b/kernel/Kconfig
 index 88e2281..91e8df8 100644
---- a/Kconfig
-+++ b/Kconfig
+--- a/kernel/Kconfig
++++ b/kernel/Kconfig
 @@ -35,6 +35,24 @@ config KSU_DISABLE_POLICY
  	  Escalation will always use the default full root profile, and
  	  non-root handling will follow the global umount policy only.

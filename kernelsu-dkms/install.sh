@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 KERNELSU_VERSION="3.3.1"
 MODULE_NAME="kernelsu"
 
@@ -38,12 +40,12 @@ log_ok "Kernel headers found: ${KVERSION}"
 log_info "Checking kernel configuration..."
 REQUIRED_CONFIGS=("CONFIG_KPROBES" "CONFIG_EXT4_FS" "CONFIG_KALLSYMS" "CONFIG_MODULES")
 for config in "${REQUIRED_CONFIGS[@]}"; do
-    if ! grep -q "^${config}=[ym]" "/boot/config-${KVERSION}" 2>/dev/null; then
-        if ! zcat "/proc/config.gz" 2>/dev/null | grep -q "^${config}=[ym]"; then
-            log_warn "${config} not found in kernel config - module may not work"
-        fi
-    else
+    if grep -q "^${config}=[ym]" "/boot/config-${KVERSION}" 2>/dev/null; then
         log_ok "${config}=y/m"
+    elif [ -r /proc/config.gz ] && zcat /proc/config.gz 2>/dev/null | grep -q "^${config}=[ym]"; then
+        log_ok "${config}=y/m"
+    else
+        log_warn "${config} not found in kernel config - module may not work"
     fi
 done
 
@@ -51,26 +53,24 @@ done
 if grep -q "^CONFIG_SECURITY_SELINUX=y" "/boot/config-${KVERSION}" 2>/dev/null || \
    zcat "/proc/config.gz" 2>/dev/null | grep -q "^CONFIG_SECURITY_SELINUX=y"; then
     log_ok "SELinux support detected in kernel"
-    SELINUX_AVAILABLE=1
+    : SELINUX_AVAILABLE=1
 else
     log_warn "SELinux not in kernel config - CONFIG_KSU_SELINUX will be disabled"
-    SELINUX_AVAILABLE=0
+    : SELINUX_AVAILABLE=0
 fi
 
 # Check for x86_64
 if [ "$(uname -m)" = "x86_64" ]; then
     log_ok "x86_64 architecture - CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER will be enabled"
-    X86_64=1
+    : X86_64=1
 else
     log_info "Non-x86 architecture - CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER not applicable"
-    X86_64=0
+    : X86_64=0
 fi
 
 # Fetch and prepare source
 log_info "Fetching KernelSU source..."
-./scripts/fetch-kernelsu.sh
-
-DKMS_DIR="/usr/src/kernelsu-${KERNELSU_VERSION}"
+./fetch-kernelsu.sh
 
 # Add to DKMS
 log_info "Adding to DKMS..."
@@ -86,16 +86,16 @@ dkms install -m "${MODULE_NAME}" -v "${KERNELSU_VERSION}" --force
 
 # Install modprobe config
 log_info "Installing modprobe configuration..."
-install -Dm644 /home/yash/Pictures/kernelsu-dkms/00-kernelsu.conf /etc/modprobe.d/00-kernelsu.conf
+install -Dm644 "${SCRIPT_DIR}/00-kernelsu.conf" /etc/modprobe.d/00-kernelsu.conf
 
 # Install load script
 log_info "Installing load script..."
-install -Dm755 /home/yash/Pictures/kernelsu-dkms/load-kernelsu /usr/bin/load-kernelsu
+install -Dm755 "${SCRIPT_DIR}/load-kernelsu" /usr/bin/load-kernelsu
 
 # Install modloader if available
-if [ -f /home/yash/Pictures/kernelsu-dkms/modloader ]; then
+if [ -f "${SCRIPT_DIR}/modloader" ]; then
     log_info "Installing modloader..."
-    install -Dm755 /home/yash/Pictures/kernelsu-dkms/modloader /usr/bin/modloader
+    install -Dm755 "${SCRIPT_DIR}/modloader" /usr/bin/modloader
 else
     log_warn "modloader not found - downloading..."
     curl -L "https://github.com/shadichy/modloader/releases/download/v2.0.0/modloader-x86_64-glibc" -o /tmp/modloader

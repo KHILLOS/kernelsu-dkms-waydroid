@@ -44,11 +44,16 @@ run_check "Kernel headers" test -d "/lib/modules/${KVERSION}/build"
 # Required kernel configs
 check_config() {
     local config="$1"
-    if grep -q "^${config}=[ym]" "/boot/config-${KVERSION}" 2>/dev/null; then
+    if grep -qE "^${config}=[ym]" "/boot/config-${KVERSION}" 2>/dev/null; then
         return 0
     fi
-    if [ -r /proc/config.gz ] && zcat /proc/config.gz | grep -q "^${config}=[ym]"; then
+    if grep -qE "^${config}=\".+\"$" "/boot/config-${KVERSION}" 2>/dev/null; then
         return 0
+    fi
+    if [ -r /proc/config.gz ]; then
+        if zcat /proc/config.gz 2>/dev/null | grep -qE "^${config}=([ym]|\".+\")$"; then
+            return 0
+        fi
     fi
     return 1
 }
@@ -71,7 +76,8 @@ run_check "CONFIG_UPROBES" check_config CONFIG_UPROBES
 # Architecture specific
 if [ "$(uname -m)" = "x86_64" ]; then
     run_check "CONFIG_X86_64" check_config CONFIG_X86_64
-    run_check "CONFIG_SYSCALL_DISPATCHER" check_config CONFIG_SYSCALL_DISPATCHER || log_warn "Hardened syscall dispatcher may not be available"
+    # Not a real kernel config; the KernelSU Kconfig option is KSU_X86_PATCH_SYSCALL_DISPATCHER.
+    log_warn "CONFIG_SYSCALL_DISPATCHER is not a kernel config; KernelSU handles this via CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y"
 fi
 
 # ============================================================

@@ -22,10 +22,10 @@ waydroid shell su -c "id"
 
 | Component | Description |
 |-----------|-------------|
-| `patches/0001-kconfig-add-waydroid-options.patch` | Adds `CONFIG_KSU_NON_ANDROID` and `CONFIG_KSU_SELINUX` to Kconfig |
-| `patches/0002-kbuild-add-waydroid-flags.patch` | Adds compiler flags for Waydroid config options |
-| `patches/0003-kbuild-disable-git-version.patch` | Disables git version detection for DKMS builds |
-| `patches/0004-selinux-include-paths.patch` | Fixes SELinux include paths for non-Android kernels |
+| `patches/0001-kconfig-add-waydroid-options.patch` | Adds `KSU_NON_ANDROID` and `KSU_SELINUX` to Kconfig |
+| `patches/0002-kbuild-waydroid-flags-and-dkms-version.patch` | Passes Waydroid config flags, conditional SELinux objects, DKMS git-version fallback |
+| `patches/0003-file-wrapper-selinux-guard.patch` | Guards SELinux code in `file_wrapper.c` for non-SELinux hosts |
+| `patches/0004-selinux-objsec-guard.patch` | Guards `objsec.h` include in `selinux/selinux.c` |
 | `dkms.conf` | DKMS configuration with version placeholders |
 | `Makefile` | Simple DKMS Makefile wrapper |
 | `fetch-kernelsu.sh` | Downloads v3.3.1 source, applies patches, prepares DKMS tree |

@@ -1,8 +1,29 @@
-diff --git a/Kbuild b/Kbuild
-index 6c92a01..e9ec31a 100644
---- a/Kbuild
-+++ b/Kbuild
-@@ -60,6 +60,12 @@ ifdef KBUILD_EXTMOD
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index 6c92a01..9e8cb3c 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -40,9 +40,11 @@ kernelsu-objs += policy/feature.o
+ kernelsu-objs += runtime/boot_event.o
+ kernelsu-objs += runtime/ksud_integration.o
+ 
++ifeq ($(CONFIG_KSU_SELINUX),y)
+ kernelsu-objs += selinux/selinux.o
+ kernelsu-objs += selinux/rules.o
+ kernelsu-objs += selinux/sepolicy.o
++endif
+ 
+ kernelsu-objs += sulog/event.o
+ kernelsu-objs += sulog/fd.o
+@@ -53,13 +55,21 @@ kernelsu-objs += supercall/supercall.o
+ 
+ kernelsu-objs += feature/adb_root.o
+ 
++ifeq ($(CONFIG_KSU_SELINUX),y)
+ kernelsu-objs += feature/selinux_hide.o
++endif
+ kernelsu-objs += feature/shell_su_adb_only.o
+ 
+ ifdef KBUILD_EXTMOD
  ifeq ($(CONFIG_KSU_DISABLE_MANAGER),y)
  ccflags-y += -DCONFIG_KSU_DISABLE_MANAGER=1
  endif
@@ -15,7 +36,7 @@ index 6c92a01..e9ec31a 100644
  ifeq ($(CONFIG_KSU_DISABLE_POLICY),y)
  ccflags-y += -DCONFIG_KSU_DISABLE_POLICY=1
  endif
-@@ -72,7 +78,11 @@ endif
+@@ -72,7 +82,11 @@ endif
  endif
  
  ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include
@@ -27,7 +48,7 @@ index 6c92a01..e9ec31a 100644
  
  ifneq ($(KBUILD_EXTMOD),)
  # 6.18 exports the external module source as srcroot when M/MO are used.
-@@ -96,24 +106,34 @@ MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+@@ -96,24 +110,34 @@ MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
  
  # Workaround bazel
  # https://github.com/tiann/KernelSU/pull/316#issuecomment-1479043219

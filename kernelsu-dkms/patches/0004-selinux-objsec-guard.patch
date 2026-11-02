@@ -1,0 +1,14 @@
+diff --git a/kernel/selinux/selinux.c b/kernel/selinux/selinux.c
+index e5dcc4d..2301d45 100644
+--- a/kernel/selinux/selinux.c
++++ b/kernel/selinux/selinux.c
+@@ -1,7 +1,9 @@
+ #include "selinux.h"
+ #include "linux/cred.h"
+ #include "linux/sched.h"
++#if IS_ENABLED(CONFIG_KSU_SELINUX)
+ #include "objsec.h"
++#endif
+ #include "linux/version.h"
+ #include "klog.h" // IWYU pragma: keep
+ #include "ksu.h"

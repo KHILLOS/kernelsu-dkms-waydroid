@@ -4,15 +4,14 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 KERNELSU_VERSION="v3.3.1"
 KERNELSU_REPO="https://github.com/tiann/KernelSU.git"
 KERNELSU_COMMIT="0c0fdb960178fa12d80d6cbcfdcb6ad8be6a865d"
 DATE_CHECKED="2026-11-02"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="${1:-/usr/src/kernelsu-${KERNELSU_VERSION#v}}"
-PATCHES_DIR="${PROJECT_DIR}/patches"
 
 echo "=== KernelSU DKMS Source Fetcher ==="
 echo "Version: ${KERNELSU_VERSION}"
@@ -28,7 +27,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 cd "$TMPDIR"
 
 echo "[+] Cloning KernelSU ${KERNELSU_VERSION} (shallow)..."
-git clone --depth 1 --branch "${KERNELSU_VERSION}" "${KERNELSU_REPO}" kernelsu
+git clone --filter=blob:none --branch "${KERNELSU_VERSION}" "${KERNELSU_REPO}" kernelsu
 
 echo "[+] Verifying commit..."
 cd kernelsu
@@ -40,32 +39,34 @@ if [ "$ACTUAL_COMMIT" != "$KERNELSU_COMMIT" ]; then
     echo "    This may be due to tag moving. Continuing anyway..."
 fi
 
-# Count commits for version (shallow clone returns 1, but we use known value from release)
-GIT_VERSION=32680
-echo "[+] Git version (from release artifact): ${GIT_VERSION}"
+# Count commits for version
+GIT_VERSION=$(git rev-list --count HEAD)
+echo "[+] Git version (commit count): ${GIT_VERSION}"
 
-echo "[+] Applying patches to kernel/ directory..."
-cd kernel
-for patch in "${PATCHES_DIR}"/*.patch; do
-    if [ -f "$patch" ]; then
-        echo "    Applying $(basename "$patch")..."
-        git apply "$patch"
-    fi
-done
-cd ..
+echo "[+] Applying patches..."
+if [ -f "${SCRIPT_DIR}/patches/series" ]; then
+    while IFS= read -r patch_name; do
+        echo "    Applying ${patch_name}..."
+        patch -p1 < "${SCRIPT_DIR}/patches/${patch_name}"
+    done < "${SCRIPT_DIR}/patches/series"
+else
+    for patch_file in "${SCRIPT_DIR}"/patches/*.patch; do
+        [ -e "$patch_file" ] || continue
+        echo "    Applying $(basename "$patch_file")..."
+        patch -p1 < "$patch_file"
+    done
+fi
 
 echo "[+] Copying kernel source to ${OUTPUT_DIR}..."
 mkdir -p "${OUTPUT_DIR}"
-# Copy kernel directory contents
 cp -r kernel/* "${OUTPUT_DIR}/"
-# Also copy uapi directory (at repo root) which is needed for uapi/app_profile.h etc.
-if [ -d "uapi" ]; then
-    cp -r uapi "${OUTPUT_DIR}/"
-fi
+# The kernel Makefile references headers outside kernel/ (e.g. uapi/) via
+# KSU_KERNEL_DIR=$(srcroot), so copy the repo-root dirs it includes.
+cp -r uapi "${OUTPUT_DIR}/"
 
 echo "[+] Copying DKMS build files..."
-cp "${PROJECT_DIR}/dkms.conf" "${OUTPUT_DIR}/"
-cp "${PROJECT_DIR}/Makefile" "${OUTPUT_DIR}/"
+cp "${SCRIPT_DIR}/dkms.conf" "${OUTPUT_DIR}/"
+cp "${SCRIPT_DIR}/Makefile" "${OUTPUT_DIR}/"
 
 echo "[+] Substituting version placeholders in dkms.conf..."
 sed -i "s|@PKGVER@|${KERNELSU_VERSION#v}|g; s|@KSU_GIT_VERSION@|${GIT_VERSION}|g" "${OUTPUT_DIR}/dkms.conf"

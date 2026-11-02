@@ -17,7 +17,7 @@ Build KernelSU v3.3.1 as DKMS module for Waydroid root access on regular Linux h
 - We port only the necessary Waydroid configs as patches
 
 ### 2. Patch Strategy: Minimal Focused Patches
-**Decision**: Create 4 minimal patches rather than one large patch or forking.
+**Decision**: Create 4 minimal patches (see `patches/series`) rather than one large patch or forking.
 
 | Patch | Scope | Why Separate |
 |-------|-------|--------------|

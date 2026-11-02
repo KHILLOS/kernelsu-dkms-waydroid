@@ -241,7 +241,7 @@ kernelsu               245760  0
 $ dmesg -T | grep -i kernelsu | tail -10
 [Nov 2 03:15:22] kernelsu: loading out-of-tree module taints kernel.
 [Nov 2 03:15:22] kernelsu: module verification failed: signature and/or required key missing - tainting kernel
-[Nov 2 03:15:22] kernelsu: KernelSU version: 13847
+[Nov 2 03:15:22] kernelsu: KernelSU version: 30000+<commit count>
 [Nov 2 03:15:22] kernelsu: KSU_NEW_DCACHE_FLUSH: 0
 [Nov 2 03:15:22] kernelsu: KernelSU Manager package name: me.weishu.kernelsu
 [Nov 2 03:15:22] kernelsu: KernelSU Manager signature size: 0x033b

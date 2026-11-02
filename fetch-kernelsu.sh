@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 KERNELSU_VERSION="v3.3.1"
 KERNELSU_REPO="https://github.com/tiann/KernelSU.git"
 KERNELSU_COMMIT="0c0fdb960178fa12d80d6cbcfdcb6ad8be6a865d"
@@ -25,7 +27,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 cd "$TMPDIR"
 
 echo "[+] Cloning KernelSU ${KERNELSU_VERSION} (shallow)..."
-git clone --depth 1 --branch "${KERNELSU_VERSION}" "${KERNELSU_REPO}" kernelsu
+git clone --filter=blob:none --branch "${KERNELSU_VERSION}" "${KERNELSU_REPO}" kernelsu
 
 echo "[+] Verifying commit..."
 cd kernelsu
@@ -42,20 +44,29 @@ GIT_VERSION=$(git rev-list --count HEAD)
 echo "[+] Git version (commit count): ${GIT_VERSION}"
 
 echo "[+] Applying patches..."
-for patch in /home/yash/Pictures/patches/*.patch; do
-    if [ -f "$patch" ]; then
-        echo "    Applying $(basename "$patch")..."
-        git apply "$patch"
-    fi
-done
+if [ -f "${SCRIPT_DIR}/patches/series" ]; then
+    while IFS= read -r patch_name; do
+        echo "    Applying ${patch_name}..."
+        patch -p1 < "${SCRIPT_DIR}/patches/${patch_name}"
+    done < "${SCRIPT_DIR}/patches/series"
+else
+    for patch_file in "${SCRIPT_DIR}"/patches/*.patch; do
+        [ -e "$patch_file" ] || continue
+        echo "    Applying $(basename "$patch_file")..."
+        patch -p1 < "$patch_file"
+    done
+fi
 
 echo "[+] Copying kernel source to ${OUTPUT_DIR}..."
 mkdir -p "${OUTPUT_DIR}"
 cp -r kernel/* "${OUTPUT_DIR}/"
+# The kernel Makefile references headers outside kernel/ (e.g. uapi/) via
+# KSU_KERNEL_DIR=$(srcroot), so copy the repo-root dirs it includes.
+cp -r uapi "${OUTPUT_DIR}/"
 
 echo "[+] Copying DKMS build files..."
-cp /home/yash/Pictures/dkms.conf "${OUTPUT_DIR}/"
-cp /home/yash/Pictures/Makefile "${OUTPUT_DIR}/"
+cp "${SCRIPT_DIR}/dkms.conf" "${OUTPUT_DIR}/"
+cp "${SCRIPT_DIR}/Makefile" "${OUTPUT_DIR}/"
 
 echo "[+] Substituting version placeholders in dkms.conf..."
 sed -i "s|@PKGVER@|${KERNELSU_VERSION#v}|g; s|@KSU_GIT_VERSION@|${GIT_VERSION}|g" "${OUTPUT_DIR}/dkms.conf"

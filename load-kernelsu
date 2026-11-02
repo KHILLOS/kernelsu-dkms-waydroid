@@ -33,4 +33,9 @@ case "$KSU_MODULE" in
   *) GET_CMD="cat" ;;
 esac
 
-$GET_CMD "$KSU_MODULE" | /usr/local/bin/modloader -
+MODLOADER="$(command -v modloader || true)"
+[ -z "$MODLOADER" ] && [ -x /usr/local/bin/modloader ] && MODLOADER=/usr/local/bin/modloader
+[ -z "$MODLOADER" ] && [ -x /usr/bin/modloader ] && MODLOADER=/usr/bin/modloader
+[ -z "$MODLOADER" ] && { echo "${0##*/}: modloader not found in PATH, /usr/bin or /usr/local/bin" >&2; exit 1; }
+
+$GET_CMD "$KSU_MODULE" | "$MODLOADER" -

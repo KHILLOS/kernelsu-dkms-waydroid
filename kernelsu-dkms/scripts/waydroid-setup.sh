@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 RED='\033[1;31m'
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
@@ -42,11 +44,11 @@ fi
 log_ok "KernelSU module installed"
 
 # Ensure KernelSU is loaded
-if ! lsmod | grep -q "^kernelsu"; then
+if ! cat /proc/modules | grep -q "^kernelsu "; then
     log_info "Loading KernelSU module..."
     load-kernelsu
     sleep 2
-    if ! lsmod | grep -q "^kernelsu"; then
+    if ! cat /proc/modules | grep -q "^kernelsu "; then
         log_err "Failed to load KernelSU module"
         exit 1
     fi
@@ -65,7 +67,7 @@ fi
 
 # Wait for container to be ready
 log_info "Waiting for Waydroid container..."
-for i in {1..30}; do
+for _ in {1..30}; do
     if waydroid shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
         break
     fi
@@ -84,7 +86,7 @@ waydroid shell mkdir -p /data/adb/ksu/bin 2>/dev/null || true
 # This is handled by the kernel module's LSM hooks and syscall handling
 
 # Install KernelSU manager APK if available
-MANAGER_APK="/home/yash/Pictures/KernelSU.apk"
+MANAGER_APK="${SCRIPT_DIR}/KernelSU.apk"
 if [ -f "${MANAGER_APK}" ]; then
     log_info "Installing KernelSU Manager APK..."
     waydroid app install "${MANAGER_APK}" 2>/dev/null || log_warn "APK install failed (may already be installed)"
@@ -109,7 +111,7 @@ waydroid shell getenforce 2>/dev/null || log_warn "Could not get SELinux status"
 
 # Ensure binder is working
 log_info "Checking binder..."
-if lsmod | grep -q binder; then
+if cat /proc/modules | grep -q "^binder "; then
     log_ok "binder module loaded"
 else
     log_warn "binder module not loaded - Waydroid may have issues"
