@@ -72,8 +72,9 @@ fi
 log_info "Fetching KernelSU source..."
 ./fetch-kernelsu.sh
 
-# Add to DKMS
+# Add to DKMS (remove any previous copy first so re-runs work)
 log_info "Adding to DKMS..."
+dkms remove -m "${MODULE_NAME}" -v "${KERNELSU_VERSION}" --all 2>/dev/null || true
 dkms add -m "${MODULE_NAME}" -v "${KERNELSU_VERSION}"
 
 # Build
