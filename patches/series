@@ -4,3 +4,6 @@
 0004-selinux-noop-backend.patch
 0005-file-wrapper-selinux-guard.patch
 0006-resolve-non-exported-kernel-symbols.patch
+0007-vfs-make-the-anon-inode-wrapper-portable-across-6.1-.patch
+0008-supercall-resolve-free_pids-and-free_uid-at-runtime.patch
+0009-lsm-feature-detect-the-hook-storage-layout-instead-o.patch

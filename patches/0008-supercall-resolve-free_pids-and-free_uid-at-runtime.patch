@@ -1,0 +1,95 @@
+From 01dfbc12f7f749a7bf2ec7a2625466e3c9c45a5c Mon Sep 17 00:00:00 2001
+From: z <x@y>
+Date: Mon, 9 Nov 2026 21:16:19 +0000
+Subject: [PATCH] supercall: resolve free_pids() and free_uid() at runtime
+
+---
+ kernel/policy/app_profile.c | 16 +++++++++++++++-
+ kernel/supercall/dispatch.c | 16 +++++++++++++++-
+ 2 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/policy/app_profile.c b/kernel/policy/app_profile.c
+index d7c0d6e3..037483ed 100644
+--- a/kernel/policy/app_profile.c
++++ b/kernel/policy/app_profile.c
+@@ -27,10 +27,16 @@
+ typedef void (*ksu_seccomp_filter_release_fn)(struct task_struct *tsk);
+ typedef struct user_struct *(*ksu_alloc_uid_fn)(kuid_t uid);
+ typedef int (*ksu_set_cred_ucounts_fn)(struct cred *new);
++/*
++ * free_uid() only became exported in 6.12; earlier kernels (and every LTS the
++ * backports did not reach) keep it internal, so it is resolved at runtime too.
++ */
++typedef void (*ksu_free_uid_fn)(struct user_struct *up);
+ 
+ static ksu_seccomp_filter_release_fn ksu_seccomp_filter_release_sym;
+ static ksu_alloc_uid_fn ksu_alloc_uid_sym;
+ static ksu_set_cred_ucounts_fn ksu_set_cred_ucounts_sym;
++static ksu_free_uid_fn ksu_free_uid_sym;
+ 
+ static void ksu_app_profile_resolve_symbols(void)
+ {
+@@ -42,6 +48,8 @@ static void ksu_app_profile_resolve_symbols(void)
+ 	if (!ksu_set_cred_ucounts_sym)
+ 		ksu_set_cred_ucounts_sym =
+ 			(ksu_set_cred_ucounts_fn)ksu_lookup_symbol_kprobe("set_cred_ucounts");
++	if (!ksu_free_uid_sym)
++		ksu_free_uid_sym = (ksu_free_uid_fn)ksu_lookup_symbol_kprobe("free_uid");
+ }
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+@@ -207,7 +215,13 @@ int escape_with_root_profile(void)
+         goto out_abort_creds;
+     }
+ 
+-    free_uid(cred->user);
++    /*
++     * Dropping the reference is required to avoid pinning the old uid's
++     * accounting; if free_uid() cannot be resolved the reference is left in
++     * place (a leak of one user_struct) rather than dereferencing NULL.
++     */
++    if (ksu_free_uid_sym)
++        ksu_free_uid_sym(cred->user);
+     cred->user = new_user;
+ 
+     // v5.14+ added cred->ucounts, so we must refresh it after changing uid/user:
+diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
+index 335f0916..11ca446c 100644
+--- a/kernel/supercall/dispatch.c
++++ b/kernel/supercall/dispatch.c
+@@ -673,12 +673,25 @@ static ksu_change_pid_fn ksu_change_pid_sym;
+ #endif
+ static rwlock_t *ksu_tasklist_lock_sym;
+ 
++/*
++ * free_pids() is internal on 6.15+ and not exported, so it gets the same
++ * runtime treatment as change_pid().
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
++typedef void (*ksu_free_pids_fn)(struct pid **pids);
++static ksu_free_pids_fn ksu_free_pids_sym;
++#endif
++
+ static void ksu_tasklist_resolve(void)
+ {
+     if (!ksu_change_pid_sym)
+         ksu_change_pid_sym = (ksu_change_pid_fn)ksu_lookup_symbol_kprobe("change_pid");
+     if (!ksu_tasklist_lock_sym)
+         ksu_tasklist_lock_sym = (rwlock_t *)ksu_lookup_symbol_kprobe("tasklist_lock");
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
++    if (!ksu_free_pids_sym)
++        ksu_free_pids_sym = (ksu_free_pids_fn)ksu_lookup_symbol_kprobe("free_pids");
++#endif
+ }
+ 
+ static int do_set_init_pgrp(void __user *arg)
+@@ -714,7 +727,8 @@ static int do_set_init_pgrp(void __user *arg)
+ out:
+     write_unlock_irq(ksu_tasklist_lock_sym);
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+-    free_pids(pids);
++    if (ksu_free_pids_sym)
++        ksu_free_pids_sym(pids);
+ #endif
+ 
+     return err;

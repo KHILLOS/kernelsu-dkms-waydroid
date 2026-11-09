@@ -1,0 +1,275 @@
+From 6ecd8e5fe838bf7e8fa7a6f0c4d1263cc7bd41e5 Mon Sep 17 00:00:00 2001
+From: z <x@y>
+Date: Mon, 9 Nov 2026 21:16:19 +0000
+Subject: [PATCH] lsm: feature-detect the hook storage layout instead of
+ guessing from the version
+
+---
+ kernel/Kbuild          | 40 ++++++++++++++++++++++++++
+ kernel/hook/lsm_hook.c | 64 ++++++++++++++++++++++++++++++++++++------
+ kernel/hook/lsm_hook.h | 40 ++++++++++++++++++++++++--
+ 3 files changed, 133 insertions(+), 11 deletions(-)
+
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index ca017e6e..3f4209db 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -126,6 +126,46 @@ endif
+ 
+ ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include
+ 
++# --- LSM hook storage layout ------------------------------------------------
++# hook/lsm_hook.c patches LSM hook slots at runtime, which requires the kernel
++# to describe its hook storage in a public header.  That is not a function of
++# the version number: distributions backport the static-call rework (6.12) and
++# its later removal at their own pace, so Ubuntu 5.15 reports a layout that
++# needs 6.8+ upstream, and Ubuntu 6.17 reports the post-removal one.  Probe the
++# header that is actually installed instead of guessing from LINUX_VERSION_CODE.
++KSU_LSM_HDR := $(srctree)/include/linux/lsm_hooks.h
++ifeq ($(wildcard $(KSU_LSM_HDR)),)
++KSU_LSM_HDR := $(objtree)/include/linux/lsm_hooks.h
++endif
++KSU_LSM_HDR := $(firstword $(wildcard $(srctree)/include/linux/lsm_hooks.h $(objtree)/include/linux/lsm_hooks.h))
++
++# Does the header still describe the hook storage the patcher walks?
++KSU_LSM_HAS_HEADS := $(shell grep -c 'security_hook_heads security_hook_heads' $(KSU_LSM_HDR) 2>/dev/null)
++KSU_LSM_HAS_SCALL := $(shell grep -c 'struct lsm_static_call {' $(KSU_LSM_HDR) 2>/dev/null)
++KSU_LSM_HAS_LSMID := $(shell grep -c 'struct lsm_id.*lsmid;' $(KSU_LSM_HDR) 2>/dev/null)
++
++ifeq ($(KSU_LSM_HDR),)
++$(info -- KernelSU: LSM layout: linux/lsm_hooks.h not found, LSM hooking unavailable)
++else ifneq ($(KSU_LSM_HAS_SCALL),0)
++# 6.12 - 6.16: hooks live in static_calls_table[] and the patcher can walk it.
++ccflags-y += -DKSU_LSM_LAYOUT_SCALL=1
++$(info -- KernelSU: LSM layout: static calls)
++else ifeq ($(KSU_LSM_HAS_HEADS),0)
++# Upstream 6.17+/7.0 keeps the hook list opaque and hangs it off static calls
++# the module cannot address; the structure the patcher needs is unreachable.
++$(info -- KernelSU: LSM layout: unsupported (hook internals are opaque), LSM hooking unavailable)
++else
++# <= 6.11, plus every distribution that backported the static-call rework into
++# an earlier release: hooks are published as security_hook_heads[] hlists.
++ccflags-y += -DKSU_LSM_LAYOUT_HEADS=1
++$(info -- KernelSU: LSM layout: hook heads)
++# 6.8 replaced the hook list's "char *lsm" with "const struct lsm_id *lsmid";
++# distributions have backported either form into any release.
++ifneq ($(KSU_LSM_HAS_LSMID),0)
++ccflags-y += -DKSU_LSM_HOOK_HAS_LSMID=1
++endif
++endif
++
+ obj-$(CONFIG_KSU) += kernelsu.o
+ 
+ MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+diff --git a/kernel/hook/lsm_hook.c b/kernel/hook/lsm_hook.c
+index a4ad8155..db66738e 100644
+--- a/kernel/hook/lsm_hook.c
++++ b/kernel/hook/lsm_hook.c
+@@ -11,7 +11,7 @@
+ #include "hook/lsm_hook.h"
+ #include "hook/patch_memory.h"
+ #include "klog.h" // IWYU pragma: keep
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#if defined(KSU_LSM_LAYOUT_SCALL)
+ #include "linux/static_call.h"
+ #endif
+ 
+@@ -26,6 +26,43 @@
+  * harmless because the scan validates what it decodes.
+  */
+ #define KSU_SYM_SIZE_MAX 4096UL
++#ifdef KSU_LSM_LAYOUT_UNSUPPORTED
++
++/*
++ * This kernel's headers no longer describe the LSM hook storage (see
++ * hook/lsm_hook.h), so runtime LSM patching cannot be supported: the hook
++ * objects built into vmlinux are opaque.  The API degrades to a no-op that
++ * reports failure; callers treat that as "feature unavailable" and continue.
++ */
++int ksu_lsm_hook(struct ksu_lsm_hook *hook)
++{
++    pr_info("lsm_hook: not supported on this kernel, ignoring request for %s\n",
++            (hook && hook->head_name) ? hook->head_name : "unknown");
++    return -EOPNOTSUPP;
++}
++
++void ksu_lsm_unhook(struct ksu_lsm_hook *hook)
++{
++}
++
++int ksu_register_lsm_hook(struct ksu_lsm_hook *hook)
++{
++    return ksu_lsm_hook(hook);
++}
++
++void ksu_unregister_lsm_hook(struct ksu_lsm_hook *hook)
++{
++}
++
++void __init ksu_lsm_hook_init(void)
++{
++}
++
++void __exit ksu_lsm_hook_exit(void)
++{
++}
++
++#else /* !KSU_LSM_LAYOUT_UNSUPPORTED */
+ 
+ static bool ksu_symbol_size(unsigned long addr, unsigned long *size)
+ {
+@@ -96,7 +133,7 @@ static int ksu_lsm_hook_patch_slot(void **slot, void *value)
+     return ret;
+ }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#if defined(KSU_LSM_LAYOUT_SCALL)
+ typedef void (*ksu_static_call_update_t)(struct static_call_key *key, void *tramp, void *func);
+ 
+ static int ksu_lsm_hook_update_scall(struct lsm_static_call *scall, void *value)
+@@ -113,7 +150,7 @@ int ksu_lsm_hook(struct ksu_lsm_hook *hook)
+     struct security_hook_list *entry;
+     void *target;
+     const char *target_name;
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#if defined(KSU_LSM_LAYOUT_SCALL)
+     static unsigned long scalls_addr = 0;
+     struct lsm_static_call *scalls = NULL;
+     static size_t scalls_count = 0;
+@@ -158,7 +195,7 @@ int ksu_lsm_hook(struct ksu_lsm_hook *hook)
+     }
+     pr_info("target: 0x%lx %pSb\n", (unsigned long)target, target);
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#if defined(KSU_LSM_LAYOUT_SCALL)
+     if (!scalls_addr) {
+         scalls_addr = find_kernel_symbol_exact("static_calls_table");
+     }
+@@ -366,7 +403,16 @@ int ksu_lsm_hook(struct ksu_lsm_hook *hook)
+                     hook->list.head = head;
+                     hook->list.list.next = NULL;
+                     hook->list.list.pprev = &head->first;
++                    #if defined(KSU_LSM_HOOK_HAS_LSMID)
++                    /*
++                     * 5.15's struct security_hook_list carries a struct lsm_id
++                     * pointer, which this module cannot synthesise without a
++                     * registered LSM id; leave it NULL so the list entry is
++                     * still walkable but never reports a bogus LSM name.
++                     */
++#else
+                     hook->list.lsm = "ksu";
++#endif
+                     *(void **)((char *)selected_entry + hook->hook_offset) = hook->replacement;
+                     selected_slot = (void **)&head->first;
+                     selected_origin = NULL;
+@@ -421,7 +467,7 @@ void ksu_lsm_unhook(struct ksu_lsm_hook *hook)
+     void **slot;
+     mutex_lock(&ksu_lsm_hook_lock);
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#if defined(KSU_LSM_LAYOUT_SCALL)
+     if (!hook->entry || !hook->scall) {
+ #else
+     if (!hook->entry) {
+@@ -430,7 +476,7 @@ void ksu_lsm_unhook(struct ksu_lsm_hook *hook)
+         return;
+     }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#if defined(KSU_LSM_LAYOUT_SCALL)
+     slot = (void **)((char *)hook->entry + hook->hook_offset);
+ #else
+     if (hook->entry == &hook->list) {
+@@ -447,7 +493,7 @@ void ksu_lsm_unhook(struct ksu_lsm_hook *hook)
+         return;
+     }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#if defined(KSU_LSM_LAYOUT_SCALL)
+     if (ksu_lsm_hook_update_scall(hook->scall, hook->original)) {
+         if (ksu_lsm_hook_patch_slot(slot, hook->replacement))
+             pr_err("lsm_hook: failed to reapply %s after static call restore failure\n", hook->head_name ?: "unknown");
+@@ -460,7 +506,7 @@ void ksu_lsm_unhook(struct ksu_lsm_hook *hook)
+     pr_info("lsm_hook: restored %s hook slot %px to %px\n", hook->head_name ?: "unknown", slot, hook->original);
+     ksu_lsm_hook_untrack(hook);
+     hook->entry = NULL;
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#if defined(KSU_LSM_LAYOUT_SCALL)
+     hook->scall = NULL;
+ #endif
+     mutex_unlock(&ksu_lsm_hook_lock);
+@@ -496,3 +542,5 @@ void __exit ksu_lsm_hook_exit(void)
+     for (i = count - 1; i >= 0; i--)
+         ksu_lsm_unhook(hooks[i]);
+ }
++
++#endif /* KSU_LSM_LAYOUT_UNSUPPORTED */
+diff --git a/kernel/hook/lsm_hook.h b/kernel/hook/lsm_hook.h
+index 73895787..cf9003a9 100644
+--- a/kernel/hook/lsm_hook.h
++++ b/kernel/hook/lsm_hook.h
+@@ -5,12 +5,38 @@
+ #include <linux/stddef.h>
+ #include <linux/version.h>
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++/*
++ * The layout of the kernel's LSM hook storage is not a property of the version
++ * number alone: distributions backport the static-call rework and the later
++ * removal of it at different times, so Kbuild feature-detects what this
++ * kernel's headers actually declare (see KSU_LSM_LAYOUT_* in Kbuild) and
++ * defines exactly one of the three cases below.
++ *
++ *   KSU_LSM_LAYOUT_HEADS         security_hook_heads[] hlist, <= 6.11
++ *   KSU_LSM_LAYOUT_SCALL         static_calls_table[], 6.12 - 6.16
++ *   KSU_LSM_LAYOUT_UNSUPPORTED   internals removed from public headers; the
++ *                                hook objects built by the kernel into
++ *                                vmlinux are opaque and no longer carry a
++ *                                usable struct security_hook_list, so runtime
++ *                                patching is impossible from a module.
++ */
++#if defined(KSU_LSM_LAYOUT_HEADS)
++#define KSU_LSM_HOOK_HEADS_TYPE struct security_hook_heads
++#elif defined(KSU_LSM_LAYOUT_SCALL)
+ #define KSU_LSM_HOOK_HEADS_TYPE struct lsm_static_calls_table
+ #else
+-#define KSU_LSM_HOOK_HEADS_TYPE struct security_hook_heads
++#define KSU_LSM_LAYOUT_UNSUPPORTED 1
+ #endif
+ 
++#ifdef KSU_LSM_LAYOUT_UNSUPPORTED
++
++/* The feature is unavailable, so the descriptor is opaque to callers. */
++struct ksu_lsm_hook {
++    int unused;
++};
++
++#else /* !KSU_LSM_LAYOUT_UNSUPPORTED */
++
+ struct ksu_lsm_hook {
+     const char *head_name;
+     const char *target_name;
+@@ -19,7 +45,7 @@ struct ksu_lsm_hook {
+     void *replacement;
+     void *original;
+     struct security_hook_list *entry;
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#if defined(KSU_LSM_LAYOUT_SCALL)
+     struct lsm_static_call *scall;
+ #else
+     struct security_hook_list list;
+@@ -43,6 +69,14 @@ struct ksu_lsm_hook {
+     }
+ // clang-format on
+ 
++#if defined(KSU_LSM_HOOK_HAS_LSMID)
++#define KSU_LSM_LIST_OWNER_FIELD lsmid
++#else
++#define KSU_LSM_LIST_OWNER_FIELD lsm
++#endif
++
++#endif /* !KSU_LSM_LAYOUT_UNSUPPORTED */
++
+ // This API implements runtime patching of existing LSM hook slots. It is a
+ // workaround for out-of-tree modules, not the normal LSM registration path via
+ // security_add_hooks(). The security framework does not expose a dedicated
