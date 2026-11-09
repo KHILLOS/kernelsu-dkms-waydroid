@@ -23,9 +23,11 @@ waydroid shell su -c "id"
 | Component | Description |
 |-----------|-------------|
 | `patches/0001-kconfig-add-waydroid-options.patch` | Adds `KSU_NON_ANDROID` and `KSU_SELINUX` to Kconfig |
-| `patches/0002-kbuild-waydroid-flags-and-dkms-version.patch` | Passes Waydroid config flags, conditional SELinux objects, DKMS git-version fallback |
-| `patches/0003-file-wrapper-selinux-guard.patch` | Guards SELinux code in `file_wrapper.c` for non-SELinux hosts |
-| `patches/0004-selinux-objsec-guard.patch` | Guards `objsec.h` include in `selinux/selinux.c` |
+| `patches/0002-kbuild-dkms-version-and-selinux-objects.patch` | Selects SELinux objects vs. the no-op backend, passes Waydroid config flags, DKMS git-version fallback, arch-safe `KSU_NEW_DCACHE_FLUSH` |
+| `patches/0003-symbol-resolver-kprobe-and-compat-header.patch` | Replaces the non-exported `kallsyms_*` API with a `register_kprobe()` based resolver; adds `include/ksu_compat.h` |
+| `patches/0004-selinux-noop-backend.patch` | Adds `selinux/selinux_none.c`, a no-op implementation used when `CONFIG_KSU_SELINUX=n` |
+| `patches/0005-file-wrapper-selinux-guard.patch` | Guards SELinux-specific inode relabelling in `file_wrapper.c` |
+| `patches/0006-resolve-non-exported-kernel-symbols.patch` | Resolves `path_mount`, `tasklist_lock`, `__tracepoint_sys_enter`, `init_mm`, `strncpy_from_user_nofault`, etc. at runtime |
 | `dkms.conf` | DKMS configuration with version placeholders |
 | `Makefile` | Simple DKMS Makefile wrapper |
 | `fetch-kernelsu.sh` | Downloads v3.3.1 source, applies patches, prepares DKMS tree |
@@ -163,10 +165,12 @@ waydroid shell su -c "id"
 
 | Patch | Purpose |
 |-------|---------|
-| 0001 | Adds `CONFIG_KSU_NON_ANDROID` (disables PID=1 check) and `CONFIG_KSU_SELINUX` (enables SELinux integration) |
-| 0002 | Propagates config options to C compiler flags (`-DCONFIG_KSU_NON_ANDROID=1`) |
-| 0003 | Disables git version detection (DKMS builds outside git repo) |
-| 0004 | Adds fallback SELinux include paths for standard Linux kernels |
+| 0001 | Adds `CONFIG_KSU_NON_ANDROID` (disables PID=1 check) and `CONFIG_KSU_SELINUX` |
+| 0002 | Build system: SELinux vs. no-op objects, config flags, DKMS version, arch-safe flags |
+| 0003 | `register_kprobe()`-based symbol resolver + out-of-tree compat header |
+| 0004 | No-op SELinux backend so the module links with `CONFIG_KSU_SELINUX=n` |
+| 0005 | Guard SELinux-only inode relabelling in the file wrapper |
+| 0006 | Runtime resolution of non-exported kernel symbols used across the module |
 
 ## Configuration Options
 
@@ -175,7 +179,7 @@ waydroid shell su -c "id"
 CONFIG_KSU=m                           # Build as module
 CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y  # x86_64 syscall hooking
 CONFIG_KSU_NON_ANDROID=y               # Waydroid/non-Android support
-CONFIG_KSU_SELINUX=n                   # Enable if host has SELinux (default n)
+CONFIG_KSU_SELINUX=n                   # Must stay n for DKMS builds (see note below)
 CONFIG_KSU_DEBUG=n                     # Debug builds
 CONFIG_KSU_DISABLE_MANAGER=y           # Disable manager APK detection
 ```
@@ -279,9 +283,11 @@ Removes DKMS module, configs, scripts, and restores Waydroid seccomp backup.
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Patch 0001 (Kconfig) | ✓ Applied | Adds NON_ANDROID, SELINUX |
-| Patch 0002 (Kbuild flags) | ✓ Applied | Compiler flags added |
-| Patch 0003 (git version) | ✓ Applied | Disabled for DKMS |
-| Patch 0004 (SELinux paths) | ✓ Applied | Fallback includes |
+| Patch 0002 (Kbuild) | ✓ Applied | Object selection, config flags, DKMS version |
+| Patch 0003 (symbol resolver) | ✓ Applied | kprobe-based lookup, compat header |
+| Patch 0004 (SELinux no-op) | ✓ Applied | Links with `CONFIG_KSU_SELINUX=n` |
+| Patch 0005 (file wrapper) | ✓ Applied | SELinux inode relabel guarded |
+| Patch 0006 (runtime symbols) | ✓ Applied | No unresolved symbols at load time |
 | DKMS add | ✓ Tested | Module added successfully |
 | DKMS build | ✓ Tested | Built successfully on 7.1.5+kali-amd64 |
 | DKMS install | ✓ Tested | Installed to /lib/modules/.../extra/ |
@@ -291,7 +297,11 @@ Removes DKMS module, configs, scripts, and restores Waydroid seccomp backup.
 
 ## Known Limitations
 
-1. **CONFIG_KSU_SELINUX defaults to n** - Enable in dkms.conf if your host kernel has SELinux
+1. **CONFIG_KSU_SELINUX must stay n for DKMS builds** - The SELinux backend needs
+   `security/selinux/objsec.h` and `ss/policydb.h`, which no distro kernel-headers
+   package ships and whose structs are not ABI-stable. A no-op backend
+   (`kernel/selinux/selinux_none.c`) is compiled instead: root escalation still works,
+   but process SELinux labels and custom sepolicy rules are not applied.
 2. **x86_64 only tested** - arm64 support exists in upstream but untested here
 3. **Manager APK not included** - Download from GitHub releases separately
 4. **No initramfs integration** - Module loads manually via `load-kernelsu` or systemd service

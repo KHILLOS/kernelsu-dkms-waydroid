@@ -1,41 +1,75 @@
 #!/bin/bash
+# load-kernelsu - load the KernelSU module without kernel module signature checks
+#
+# DKMS writes the built module either uncompressed or compressed (.xz is the
+# Debian/Ubuntu default, .zst on Fedora/Arch), so the on-disk file is located by
+# glob and decompressed on the fly.  A custom loader (modloader) is used because
+# the module is unsigned; plain insmod would be rejected when Secure Boot is on.
 
-[ $EUID = 0 ] || {
-  echo "${0##*/}: Please run as root."
+set -u
+
+[ "${EUID}" = 0 ] || {
+  echo "${0##*/}: Please run as root." >&2
   exit 1
 }
 
 KVERSION=$(uname -r)
 
-KSU_MODULE=$(modinfo kernelsu | grep filename | awk '{print $2}')
-[ "$KSU_MODULE" ] || KSU_MODULE=$(find /usr/lib/modules/"$KVERSION"/{extras,updates} -iname 'kernelsu.ko*' 2>/dev/null)
+# Locate the module: modinfo knows the installed path, but it returns the plain
+# .ko name and may not exist yet if the module was never installed for this
+# kernel.  Fall back to searching the usual DKMS/depmod locations.
+KSU_MODULE=""
+if command -v modinfo >/dev/null 2>&1; then
+  KSU_MODULE=$(modinfo -n kernelsu 2>/dev/null)
+fi
 
-[ "$KSU_MODULE" ] || {
-  echo "${0##*/}: Module kernelsu is not available for kernel '$KVERSION'!"
+if [ -z "${KSU_MODULE}" ] || [ ! -e "${KSU_MODULE}" ]; then
+  KSU_MODULE=$(find /usr/lib/modules/"${KVERSION}" /lib/modules/"${KVERSION}" \
+    -iname 'kernelsu.ko*' 2>/dev/null | head -n 1)
+fi
+
+[ -n "${KSU_MODULE}" ] && [ -e "${KSU_MODULE}" ] || {
+  echo "${0##*/}: Module kernelsu is not available for kernel '${KVERSION}'!" >&2
+  echo "${0##*/}: Build it first with: dkms build/install -m kernelsu -v <version>" >&2
   exit 1
 }
 
 # Ensure dependencies are installed
-if ! grep -wq ext4 /proc/modules; then
-  modprobe ext4
+if ! grep -qw ext4 /proc/modules; then
+  modprobe ext4 2>/dev/null || echo "${0##*/}: warning: could not load ext4" >&2
 fi
 
-case "$1" in
--d|--unload-first) if lsmod | grep -q kernelsu; then
-  rmmod kernelsu
-fi ;;
+case "${1:-}" in
+-d|--unload-first)
+  if lsmod | grep -q '^kernelsu'; then
+    rmmod kernelsu
+  fi
+  ;;
 esac
 
-case "$KSU_MODULE" in
-  *.zst) GET_CMD="zstdcat" ;;
-  *.xz) GET_CMD="xzcat" ;;
-  *.gz) GET_CMD="gzip -dc" ;;
-  *) GET_CMD="cat" ;;
+# Pick a decompressor based on the real file suffix.
+case "${KSU_MODULE}" in
+  *.zst) GET_CMD=(zstd -dc) ;;
+  *.xz) GET_CMD=(xz -dc) ;;
+  *.gz) GET_CMD=(gzip -dc) ;;
+  *.bz2) GET_CMD=(bzip2 -dc) ;;
+  *) GET_CMD=(cat) ;;
 esac
 
+if ! command -v "${GET_CMD[0]}" >/dev/null 2>&1; then
+  echo "${0##*/}: ${GET_CMD[0]} not found, needed to read ${KSU_MODULE}" >&2
+  echo "${0##*/}: install it (e.g. apt install xz-utils / zstd) and retry." >&2
+  exit 1
+fi
+
+# modloader is required: it loads the module without kernel signature checks.
 MODLOADER="$(command -v modloader || true)"
-[ -z "$MODLOADER" ] && [ -x /usr/local/bin/modloader ] && MODLOADER=/usr/local/bin/modloader
-[ -z "$MODLOADER" ] && [ -x /usr/bin/modloader ] && MODLOADER=/usr/bin/modloader
-[ -z "$MODLOADER" ] && { echo "${0##*/}: modloader not found in PATH, /usr/bin or /usr/local/bin" >&2; exit 1; }
+[ -z "${MODLOADER}" ] && [ -x /usr/local/bin/modloader ] && MODLOADER=/usr/local/bin/modloader
+[ -z "${MODLOADER}" ] && [ -x /usr/bin/modloader ] && MODLOADER=/usr/bin/modloader
+[ -n "${MODLOADER}" ] || {
+  echo "${0##*/}: modloader not found in PATH, /usr/bin or /usr/local/bin" >&2
+  echo "${0##*/}: install it by re-running install.sh from the repo" >&2
+  exit 1
+}
 
-$GET_CMD "$KSU_MODULE" | "$MODLOADER" -
+"${GET_CMD[@]}" "${KSU_MODULE}" | "${MODLOADER}" -

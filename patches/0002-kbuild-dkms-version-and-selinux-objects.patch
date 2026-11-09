@@ -1,0 +1,129 @@
+From 2c57238656fedf9ab6545301ba33b7a132195bda Mon Sep 17 00:00:00 2001
+From: z <x@y>
+Date: Mon, 9 Nov 2026 20:00:04 +0000
+Subject: [PATCH] kbuild
+
+---
+ kernel/Kbuild | 62 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 61 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index 6c92a01..ca017e6 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -40,9 +40,17 @@ kernelsu-objs += policy/feature.o
+ kernelsu-objs += runtime/boot_event.o
+ kernelsu-objs += runtime/ksud_integration.o
+ 
++ifeq ($(CONFIG_KSU_SELINUX),y)
+ kernelsu-objs += selinux/selinux.o
+ kernelsu-objs += selinux/rules.o
+ kernelsu-objs += selinux/sepolicy.o
++else
++# The SELinux backend needs kernel-private headers (security/selinux/objsec.h,
++# ss/policydb.h, ...) that distro kernel-headers packages do not ship, and the
++# structs they expose are not ABI-stable or exported.  Compile a no-op backend
++# instead so every symbol the rest of the module calls still resolves.
++kernelsu-objs += selinux/selinux_none.o
++endif
+ 
+ kernelsu-objs += sulog/event.o
+ kernelsu-objs += sulog/fd.o
+@@ -53,13 +61,21 @@ kernelsu-objs += supercall/supercall.o
+ 
+ kernelsu-objs += feature/adb_root.o
+ 
++ifeq ($(CONFIG_KSU_SELINUX),y)
+ kernelsu-objs += feature/selinux_hide.o
++endif
+ kernelsu-objs += feature/shell_su_adb_only.o
+ 
+ ifdef KBUILD_EXTMOD
+ ifeq ($(CONFIG_KSU_DISABLE_MANAGER),y)
+ ccflags-y += -DCONFIG_KSU_DISABLE_MANAGER=1
+ endif
++ifeq ($(CONFIG_KSU_NON_ANDROID),y)
++ccflags-y += -DCONFIG_KSU_NON_ANDROID=1
++endif
++ifeq ($(CONFIG_KSU_SELINUX),y)
++ccflags-y += -DCONFIG_KSU_SELINUX=1
++endif
+ ifeq ($(CONFIG_KSU_DISABLE_POLICY),y)
+ ccflags-y += -DCONFIG_KSU_DISABLE_POLICY=1
+ endif
+@@ -71,8 +87,28 @@ ccflags-y += -DCONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=1
+ endif
+ endif
+ 
++# Fail early with an actionable message instead of a cryptic
++# "objsec.h: No such file or directory" when SELinux support was requested for
++# a kernel whose headers do not ship the private SELinux sources.
++ifeq ($(CONFIG_KSU_SELINUX),y)
++ifneq ($(KBUILD_EXTMOD),)
++ifeq ($(strip $(wildcard $(objtree)/security/selinux/objsec.h)$(wildcard $(srctree)/security/selinux/objsec.h)),)
++$(error CONFIG_KSU_SELINUX=y but this kernel's headers do not ship security/selinux/objsec.h - distro kernels cannot build the SELinux backend out-of-tree, set CONFIG_KSU_SELINUX=n in dkms.conf)
++endif
++endif
++endif
++
+ ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include
++ifeq ($(CONFIG_KSU_SELINUX),y)
+ ccflags-y += -I$(objtree)/security/selinux -include $(srctree)/include/uapi/asm-generic/errno.h
++endif
++
++# In an out-of-tree build $(src) is absolute and $(KSU_KERNEL_DIR) is only set
++# later below, so the "selinux/..." and "feature/..." style includes used by the
++# module would not resolve.  Add the source root explicitly.
++ifneq ($(KBUILD_EXTMOD),)
++ccflags-y += -I$(src) -I$(src)/include
++endif
+ 
+ ifneq ($(KBUILD_EXTMOD),)
+ # 6.18 exports the external module source as srcroot when M/MO are used.
+@@ -96,6 +132,18 @@ MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+ 
+ # Workaround bazel
+ # https://github.com/tiann/KernelSU/pull/316#issuecomment-1479043219
++# Git version detection is skipped for out-of-tree (DKMS) builds: DKMS builds
++# from /usr/src/, which is not a git repository, so the detection below always
++# fails there and KSU_GIT_VERSION stays empty (making KSU_VERSION invalid).
++# For DKMS the version is supplied by the MAKE directive in dkms.conf, which
++# fetch-kernelsu.sh fills in with the real commit count.
++ifneq ($(KBUILD_EXTMOD),)
++ifndef KSU_GIT_VERSION
++$(warning -- KernelSU: KSU_GIT_VERSION not set, defaulting to 0)
++KSU_GIT_VERSION := 0
++endif
++KSU_GIT_VERSION_VALID := 1
++else
+ GIT := $(shell PATH="$$PATH":/usr/bin:/usr/local/bin which git)
+ ifneq ($(GIT),)
+ # Check if this is a git repository
+@@ -114,6 +162,7 @@ endif
+ else
+ $(warning -- KernelSU: Git not detected, make sure git is installed in your PATH!)
+ endif
++endif
+ 
+ 
+ # Calculate version if git version is available
+@@ -125,7 +174,18 @@ ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
+ else
+ # If there is no .git directory, use default version
+ $(warning "KSU_GIT_VERSION not defined! It is better to make KernelSU a git repository!")
+-ccflags-y += -DKSU_VERSION=16
++# 16 was a bogus version number; use the base so the reported version stays
++# self-consistent when the git version is unknown.
++ccflags-y += -DKSU_VERSION=30000
++endif
++
++# KSU_NEW_DCACHE_FLUSH probes an arm64-only header.  On other architectures
++# $(srctree)/arch/arm64/... does not exist, so grep fails and the value becomes
++# a bogus status string that is then handed to the preprocessor as
++# -DKSU_NEW_DCACHE_FLUSH=<garbage>.
++ifeq ($(CONFIG_ARM64),y)
++else
++KSU_NEW_DCACHE_FLUSH := 0
+ endif
+ 
+ KSU_NEW_DCACHE_FLUSH := $(shell grep -q __flush_dcache_area $(srctree)/arch/arm64/include/asm/cacheflush.h ; echo $$?)

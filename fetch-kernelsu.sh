@@ -33,10 +33,12 @@ echo "[+] Verifying commit..."
 cd kernelsu
 ACTUAL_COMMIT=$(git rev-parse HEAD)
 if [ "$ACTUAL_COMMIT" != "$KERNELSU_COMMIT" ]; then
-    echo "[!] Warning: Commit mismatch!"
-    echo "    Expected: $KERNELSU_COMMIT"
-    echo "    Actual:   $ACTUAL_COMMIT"
-    echo "    This may be due to tag moving. Continuing anyway..."
+    echo "[!] ERROR: Commit mismatch!" >&2
+    echo "    Expected: $KERNELSU_COMMIT" >&2
+    echo "    Actual:   $ACTUAL_COMMIT" >&2
+    echo "    The patch series is pinned to a specific commit; re-pin" >&2
+    echo "    KERNELSU_COMMIT in this script or refresh the patches." >&2
+    exit 1
 fi
 
 # Count commits for version
@@ -46,8 +48,15 @@ echo "[+] Git version (commit count): ${GIT_VERSION}"
 echo "[+] Applying patches..."
 if [ -f "${SCRIPT_DIR}/patches/series" ]; then
     while IFS= read -r patch_name; do
+        # skip blank lines and comments in the series file
+        case "${patch_name}" in ''|'#'*) continue ;; esac
         echo "    Applying ${patch_name}..."
-        patch -p1 < "${SCRIPT_DIR}/patches/${patch_name}"
+        if ! patch -p1 --forward --dry-run < "${SCRIPT_DIR}/patches/${patch_name}" >/dev/null; then
+            echo "[!] ERROR: ${patch_name} does not apply cleanly." >&2
+            echo "    Upstream changed or the patch series is out of date." >&2
+            exit 1
+        fi
+        patch -p1 --forward < "${SCRIPT_DIR}/patches/${patch_name}" >/dev/null
     done < "${SCRIPT_DIR}/patches/series"
 else
     for patch_file in "${SCRIPT_DIR}"/patches/*.patch; do
@@ -57,7 +66,20 @@ else
     done
 fi
 
+if find . -name '*.rej' | grep -q .; then
+    echo "[!] ERROR: rejected hunks left behind:" >&2
+    find . -name '*.rej' >&2
+    exit 1
+fi
+find . -name '*.orig' -delete
+
 echo "[+] Copying kernel source to ${OUTPUT_DIR}..."
+# Start from a clean tree: copying over a previous run would leave stale objects
+# from the old source next to the new ones.
+if [ -d "${OUTPUT_DIR}" ]; then
+    echo "    Removing previous ${OUTPUT_DIR}"
+    rm -rf "${OUTPUT_DIR}"
+fi
 mkdir -p "${OUTPUT_DIR}"
 cp -r kernel/* "${OUTPUT_DIR}/"
 # The kernel Makefile references headers outside kernel/ (e.g. uapi/) via

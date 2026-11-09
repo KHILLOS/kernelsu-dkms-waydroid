@@ -1,5 +1,14 @@
+From 7afcad6a587f86e0d7f5d65c303920013905714c Mon Sep 17 00:00:00 2001
+From: z <x@y>
+Date: Mon, 9 Nov 2026 20:00:10 +0000
+Subject: [PATCH] filewrapper
+
+---
+ kernel/infra/file_wrapper.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
 diff --git a/kernel/infra/file_wrapper.c b/kernel/infra/file_wrapper.c
-index 7372df0..fc40c9f 100644
+index 7372df0..e8d27f4 100644
 --- a/kernel/infra/file_wrapper.c
 +++ b/kernel/infra/file_wrapper.c
 @@ -1,6 +1,7 @@
@@ -26,25 +35,21 @@ index 7372df0..fc40c9f 100644
  
  #include "infra/file_wrapper.h"
  
-@@ -533,6 +538,7 @@ int ksu_install_file_wrapper(int fd)
-     // Now do magic on inode and dentry.
-     // It should be safe to modify them since the file hasn't been published.
- 
-+#if IS_ENABLED(CONFIG_KSU_SELINUX)
+@@ -536,12 +541,17 @@ int ksu_install_file_wrapper(int fd)
      struct inode *wrapper_inode = file_inode(wrapper_file);
      // libc's stdio relies on the fstat() result of the fd to determine its buffer type.
      wrapper_inode->i_mode = file_inode(orig_file)->i_mode;
-@@ -544,6 +550,13 @@ int ksu_install_file_wrapper(int fd)
++#if IS_ENABLED(CONFIG_KSU_SELINUX)
++    // The inode security blob and its accessor only exist when the kernel's
++    // SELinux code is available.  Without CONFIG_KSU_SELINUX leave the inode
++    // label untouched (the fd then carries the caller's context).
+     struct inode_security_struct *wrapper_sec = selinux_inode(wrapper_inode);
+     // Use ksu_file_sid to bypass SELinux check.
+     // When we call `su` from terminal app, this is useful.
+     if (wrapper_sec) {
+         wrapper_sec->sid = ksu_file_sid;
      }
++#endif
      // Install open file operation for inode.
      wrapper_inode->i_fop = &ksu_file_wrapper_inode_fops;
-+#endif
-+
-+#if !IS_ENABLED(CONFIG_KSU_SELINUX)
-+    struct inode *wrapper_inode = file_inode(wrapper_file);
-+    wrapper_inode->i_mode = file_inode(orig_file)->i_mode;
-+    wrapper_inode->i_fop = &ksu_file_wrapper_inode_fops;
-+#endif
  
-     struct path *orig_path = kmalloc(sizeof(struct path), GFP_KERNEL);
-     if (!orig_path) {

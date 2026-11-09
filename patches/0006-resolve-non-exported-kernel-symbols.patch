@@ -1,0 +1,685 @@
+From d2438f00596861692afa3f8d10be694ab60fe881 Mon Sep 17 00:00:00 2001
+From: z <x@y>
+Date: Mon, 9 Nov 2026 20:00:14 +0000
+Subject: [PATCH] runtime-syms
+
+---
+ kernel/feature/kernel_umount.c     | 14 +++++-
+ kernel/feature/sucompat.c          |  1 +
+ kernel/hook/lsm_hook.c             | 27 ++++++++++-
+ kernel/hook/syscall_hook_manager.c | 23 ++++++++--
+ kernel/hook/tp_marker.c            | 36 ++++++++++++---
+ kernel/hook/x86_64/patch_memory.c  | 11 ++++-
+ kernel/include/util.h              | 21 ++++++++-
+ kernel/infra/su_mount_ns.c         | 74 ++++++++++++++++++++++++++----
+ kernel/policy/app_profile.c        | 49 +++++++++++++++++---
+ kernel/runtime/boot_event.c        | 14 +++++-
+ kernel/runtime/ksud_integration.c  |  1 +
+ kernel/sulog/event.c               |  2 +
+ kernel/supercall/dispatch.c        | 38 +++++++++++++--
+ 13 files changed, 273 insertions(+), 38 deletions(-)
+
+diff --git a/kernel/feature/kernel_umount.c b/kernel/feature/kernel_umount.c
+index 7e337ab..8738d75 100644
+--- a/kernel/feature/kernel_umount.c
++++ b/kernel/feature/kernel_umount.c
+@@ -11,6 +11,7 @@
+ #include <linux/types.h>
+ 
+ #include "feature/kernel_umount.h"
++#include "infra/symbol_resolver.h"
+ #include "klog.h" // IWYU pragma: keep
+ #include "policy/allowlist.h"
+ #include "selinux/selinux.h"
+@@ -41,11 +42,20 @@ static const struct ksu_feature_handler kernel_umount_handler = {
+     .set_handler = kernel_umount_feature_set,
+ };
+ 
+-extern int path_umount(struct path *path, int flags);
++/* path_umount() is not exported to modules; resolve it at runtime. */
++typedef int (*ksu_path_umount_fn)(struct path *path, int flags);
++static ksu_path_umount_fn ksu_path_umount_sym;
+ 
+ static void ksu_umount_mnt(const char *mnt, struct path *path, int flags)
+ {
+-    int err = path_umount(path, flags);
++    if (!ksu_path_umount_sym)
++        ksu_path_umount_sym = (ksu_path_umount_fn)ksu_lookup_symbol_kprobe("path_umount");
++    if (!ksu_path_umount_sym) {
++        pr_info("umount %s skipped: path_umount unavailable\n", mnt);
++        return;
++    }
++
++    int err = ksu_path_umount_sym(path, flags);
+     if (err) {
+         pr_info("umount %s failed: %d\n", mnt, err);
+     }
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+index f5cd7bf..bd8e6b8 100644
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -16,6 +16,7 @@
+ #include <linux/ptrace.h>
+ 
+ #include "arch.h"
++#include "ksu_compat.h"
+ #include "policy/allowlist.h"
+ #include "policy/feature.h"
+ #include "klog.h" // IWYU pragma: keep
+diff --git a/kernel/hook/lsm_hook.c b/kernel/hook/lsm_hook.c
+index 4598c6b..a4ad815 100644
+--- a/kernel/hook/lsm_hook.c
++++ b/kernel/hook/lsm_hook.c
+@@ -14,6 +14,29 @@
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+ #include "linux/static_call.h"
+ #endif
++
++/*
++ * kallsyms_lookup_size_offset() is internal and not exported to modules, so an
++ * out-of-tree build cannot query a symbol's extent.  The only consumer here
++ * uses the size as an upper bound for a read-only scan of a kernel data
++ * structure, so a conservative constant is used instead of probing.
++ *
++ * KSU_SYM_SIZE_MAX covers the largest structure scanned
++ * (struct lsm_static_calls_table) with headroom; scanning a little too far is
++ * harmless because the scan validates what it decodes.
++ */
++#define KSU_SYM_SIZE_MAX 4096UL
++
++static bool ksu_symbol_size(unsigned long addr, unsigned long *size)
++{
++	if (!addr) {
++		pr_warn("ksu: symbol address unavailable\n");
++		return false;
++	}
++
++	*size = KSU_SYM_SIZE_MAX;
++	return true;
++}
+ struct ksu_lsm_hook_entry {
+     struct ksu_lsm_hook *hook;
+ };
+@@ -148,7 +171,7 @@ int ksu_lsm_hook(struct ksu_lsm_hook *hook)
+     if (scalls_count == 0) {
+         unsigned long sym_size = sizeof(struct lsm_static_calls_table);
+         u32 lsm_active_cnt = 5;
+-        if (!kallsyms_lookup_size_offset(scalls_addr, &sym_size, NULL)) {
++        if (!ksu_symbol_size(scalls_addr, &sym_size)) {
+             pr_err("failed to get size\n");
+         }
+         unsigned long addr = find_kernel_symbol_exact("lsm_active_cnt");
+@@ -284,7 +307,7 @@ int ksu_lsm_hook(struct ksu_lsm_hook *hook)
+         goto out_unlock;
+     }
+     unsigned long heads_size = sizeof(struct security_hook_heads);
+-    if (!kallsyms_lookup_size_offset(heads_addr, &heads_size, NULL)) {
++    if (!ksu_symbol_size(heads_addr, &heads_size)) {
+         pr_warn("lookup head size failed");
+     }
+ 
+diff --git a/kernel/hook/syscall_hook_manager.c b/kernel/hook/syscall_hook_manager.c
+index c11eb9d..55d43c9 100644
+--- a/kernel/hook/syscall_hook_manager.c
++++ b/kernel/hook/syscall_hook_manager.c
+@@ -14,6 +14,7 @@
+ #include "arch.h"
+ #include "klog.h" // IWYU pragma: keep
+ #include "hook/syscall_hook_manager.h"
++#include "infra/symbol_resolver.h"
+ #include "hook/tp_marker.h"
+ #include "feature/sucompat.h"
+ #include "hook/setuid_hook.h"
+@@ -93,6 +94,8 @@ static struct kretprobe *syscall_unregfunc_rp = NULL;
+ #endif
+ 
+ #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
++static struct tracepoint *ksu_sys_enter_tp;
++
+ // sys_enter handler: redirect hooked syscalls to the dispatcher
+ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
+ {
+@@ -143,7 +146,19 @@ void __init ksu_syscall_hook_manager_init(void)
+     ksu_register_syscall_hook(__NR_faccessat, ksu_hook_faccessat);
+ 
+ #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+-    ret = register_trace_prio_sys_enter(ksu_sys_enter_handler, NULL, INT_MIN);
++    /*
++     * register_trace_prio_sys_enter() expands to a reference to
++     * __tracepoint_sys_enter, which is not EXPORT_SYMBOL'd and therefore cannot
++     * be used from a module.  Use the exported
++     * tracepoint_probe_register_prio() with the runtime-resolved tracepoint.
++     */
++    ksu_sys_enter_tp = (struct tracepoint *)ksu_lookup_symbol_kprobe("__tracepoint_sys_enter");
++    if (!ksu_sys_enter_tp) {
++        pr_warn("hook_manager: __tracepoint_sys_enter not found, sys_enter hooking disabled\n");
++        ret = -ENOENT;
++    } else {
++        ret = tracepoint_probe_register_prio(ksu_sys_enter_tp, ksu_sys_enter_handler, NULL, INT_MIN);
++    }
+ #ifndef CONFIG_KRETPROBES
+     ksu_mark_running_process_locked();
+ #endif
+@@ -162,8 +177,10 @@ void __exit ksu_syscall_hook_manager_exit(void)
+ {
+     pr_info("hook_manager: ksu_hook_manager_exit called\n");
+ #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+-    unregister_trace_sys_enter(ksu_sys_enter_handler, NULL);
+-    tracepoint_synchronize_unregister();
++    if (ksu_sys_enter_tp) {
++        tracepoint_probe_unregister(ksu_sys_enter_tp, ksu_sys_enter_handler, NULL);
++        tracepoint_synchronize_unregister();
++    }
+     pr_info("hook_manager: sys_enter tracepoint unregistered\n");
+ #endif
+ 
+diff --git a/kernel/hook/tp_marker.c b/kernel/hook/tp_marker.c
+index c78bbbd..b3ceed7 100644
+--- a/kernel/hook/tp_marker.c
++++ b/kernel/hook/tp_marker.c
+@@ -1,4 +1,5 @@
+ #include "hook/tp_marker.h"
++#include "infra/symbol_resolver.h"
+ 
+ #include "linux/cred.h"
+ #include <linux/spinlock.h>
+@@ -51,18 +52,38 @@ void ksu_clear_task_tracepoint_flag_if_needed(struct task_struct *t)
+     spin_unlock_irqrestore(&tracepoint_reg_lock, flags);
+ }
+ 
++/*
++ * tasklist_lock and find_task_by_vpid() are not exported to modules, so they
++ * are resolved at runtime.
++ */
++static rwlock_t *ksu_tasklist_lock_sym;
++typedef struct task_struct *(*ksu_find_task_by_vpid_fn)(pid_t nr);
++static ksu_find_task_by_vpid_fn ksu_find_task_by_vpid_sym;
++
++static void ksu_tp_marker_resolve(void)
++{
++    if (!ksu_tasklist_lock_sym)
++        ksu_tasklist_lock_sym = (rwlock_t *)ksu_lookup_symbol_kprobe("tasklist_lock");
++    if (!ksu_find_task_by_vpid_sym)
++        ksu_find_task_by_vpid_sym =
++            (ksu_find_task_by_vpid_fn)ksu_lookup_symbol_kprobe("find_task_by_vpid");
++}
++
+ // Process marking management
+ static void handle_process_mark(bool mark)
+ {
+     struct task_struct *p, *t;
+-    read_lock(&tasklist_lock);
++    ksu_tp_marker_resolve();
++    if (!ksu_tasklist_lock_sym)
++        return;
++    read_lock(ksu_tasklist_lock_sym);
+     for_each_process_thread (p, t) {
+         if (mark)
+             ksu_set_task_tracepoint_flag(t);
+         else
+             ksu_clear_task_tracepoint_flag(t);
+     }
+-    read_unlock(&tasklist_lock);
++    read_unlock(ksu_tasklist_lock_sym);
+ }
+ 
+ void ksu_mark_all_process(void)
+@@ -80,7 +101,10 @@ void ksu_unmark_all_process(void)
+ void ksu_mark_running_process_locked(void)
+ {
+     struct task_struct *p, *t;
+-    read_lock(&tasklist_lock);
++    ksu_tp_marker_resolve();
++    if (!ksu_tasklist_lock_sym)
++        return;
++    read_lock(ksu_tasklist_lock_sym);
+     for_each_process_thread (p, t) {
+         if (t->pid != 1 && !t->mm) {
+             // skip kernel threads, but always allow pid 1
+@@ -102,7 +126,7 @@ void ksu_mark_running_process_locked(void)
+         }
+         put_cred(cred);
+     }
+-    read_unlock(&tasklist_lock);
++    read_unlock(ksu_tasklist_lock_sym);
+ }
+ 
+ void ksu_mark_running_process(void)
+@@ -125,7 +149,7 @@ int ksu_get_task_mark(pid_t pid)
+     int marked = -ESRCH;
+ 
+     rcu_read_lock();
+-    task = find_task_by_vpid(pid);
++    task = ksu_find_task_by_vpid_sym ? ksu_find_task_by_vpid_sym(pid) : NULL;
+     if (task) {
+         get_task_struct(task);
+         rcu_read_unlock();
+@@ -150,7 +174,7 @@ int ksu_set_task_mark(pid_t pid, bool mark)
+     int ret = -ESRCH;
+ 
+     rcu_read_lock();
+-    task = find_task_by_vpid(pid);
++    task = ksu_find_task_by_vpid_sym ? ksu_find_task_by_vpid_sym(pid) : NULL;
+     if (task) {
+         get_task_struct(task);
+         rcu_read_unlock();
+diff --git a/kernel/hook/x86_64/patch_memory.c b/kernel/hook/x86_64/patch_memory.c
+index ebc76f3..1edcd2a 100644
+--- a/kernel/hook/x86_64/patch_memory.c
++++ b/kernel/hook/x86_64/patch_memory.c
+@@ -7,6 +7,8 @@
+ 
+ #include <linux/cache.h>
+ #include "../patch_memory.h"
++#include "infra/symbol_resolver.h" // IWYU pragma: keep
++#include "ksu_compat.h" // IWYU pragma: keep
+ #include "klog.h" // IWYU pragma: keep
+ #include <linux/cpumask.h>
+ #include <linux/gfp.h> // IWYU pragma: keep
+@@ -29,7 +31,14 @@
+ // init_mm page tables.
+ unsigned long phys_from_virt(unsigned long addr, int *err)
+ {
+-    struct mm_struct *mm = &init_mm;
++    /*
++     * init_mm is not exported to modules.  Resolve it at runtime; fall back to
++     * current->active_mm, which is the kernel's init_mm for kernel threads.
++     */
++    static struct mm_struct *ksu_init_mm;
++    if (!ksu_init_mm)
++        ksu_init_mm = (struct mm_struct *)ksu_lookup_symbol_kprobe("init_mm");
++    struct mm_struct *mm = ksu_init_mm ? ksu_init_mm : current->active_mm;
+     pgd_t *pgd;
+     p4d_t *p4d;
+     pud_t *pud;
+diff --git a/kernel/include/util.h b/kernel/include/util.h
+index fd93400..475ae66 100644
+--- a/kernel/include/util.h
++++ b/kernel/include/util.h
+@@ -11,6 +11,7 @@
+ #include <linux/ptrace.h>
+ 
+ #include "arch.h"
++#include "ksu_compat.h"
+ 
+ #if defined(__aarch64__)
+ #define KSU_SYS_PREFIX(name) __arm64_sys_##name
+@@ -57,8 +58,24 @@ static_assert(1 == 0, "Unsupported architecture!");
+ #define __ksyscall_exp(func, arg) __ksyscall_concat(func, arg)
+ #define ksyscall(...) __ksyscall_exp(ksyscall_, __ksyscall_count_args(__VA_ARGS__))(__VA_ARGS__)
+ 
+-#define ksu_close_fd(fd) ({ ksyscall(close, fd); })
+-#define ksu_sys_setns(fd, flags) ({ ksyscall(setns, fd, flags); })
++#define ksu_close_fd(fd) ({ close_fd(fd); })
++
++/*
++ * __x64_sys_setns() is not exported to modules, so ksyscall(setns, ...) cannot
++ * link.  Resolve it at runtime like the other internal helpers.
++ */
++typedef long (*ksu_sys_setns_fn)(unsigned int fd, int flags);
++static ksu_sys_setns_fn ksu_sys_setns_sym;
++
++static inline long ksu_sys_setns(unsigned int fd, int flags)
++{
++	if (!ksu_sys_setns_sym)
++		ksu_sys_setns_sym = (ksu_sys_setns_fn)ksu_lookup_symbol_kprobe("__x64_sys_setns");
++	if (!ksu_sys_setns_sym)
++		return -ENOSYS;
++
++	return ksu_sys_setns_sym(fd, flags);
++}
+ 
+ static inline struct file *ksu_filp_open_nonotify(const char *path, int flags)
+ {
+diff --git a/kernel/infra/su_mount_ns.c b/kernel/infra/su_mount_ns.c
+index 1b1ab1d..90f9225 100644
+--- a/kernel/infra/su_mount_ns.c
++++ b/kernel/infra/su_mount_ns.c
+@@ -21,8 +21,41 @@
+ #include "infra/su_mount_ns.h"
+ #include "util.h"
+ 
+-extern int path_mount(const char *dev_name, struct path *path, const char *type_page, unsigned long flags,
+-                      void *data_page);
++/*
++ * path_mount(), set_fs_pwd(), ksys_unshare(), ns_get_path() and
++ * mntns_operations are internal and not exported to modules, so they are
++ * resolved at runtime.
++ */
++typedef int (*ksu_path_mount_fn)(const char *dev_name, struct path *path, const char *type_page,
++                                 unsigned long flags, void *data_page);
++typedef void (*ksu_set_fs_pwd_fn)(struct fs_struct *fs, const struct path *path);
++typedef long (*ksu_ksys_unshare_fn)(unsigned long unshare_flags);
++typedef struct path *(*ksu_ns_get_path_fn)(struct path *path, struct task_struct *task,
++                                           const struct proc_ns_operations *ns_ops);
++
++static ksu_path_mount_fn ksu_path_mount_sym;
++static ksu_set_fs_pwd_fn ksu_set_fs_pwd_sym;
++static ksu_ksys_unshare_fn ksu_ksys_unshare_sym;
++static ksu_ns_get_path_fn ksu_ns_get_path_sym;
++static const struct proc_ns_operations *ksu_mntns_operations_sym;
++
++static void ksu_mnt_ns_resolve_symbols(void)
++{
++	if (!ksu_path_mount_sym)
++		ksu_path_mount_sym = (ksu_path_mount_fn)ksu_lookup_symbol_kprobe("path_mount");
++	if (!ksu_set_fs_pwd_sym)
++		ksu_set_fs_pwd_sym = (ksu_set_fs_pwd_fn)ksu_lookup_symbol_kprobe("set_fs_pwd");
++	if (!ksu_ksys_unshare_sym)
++		ksu_ksys_unshare_sym = (ksu_ksys_unshare_fn)ksu_lookup_symbol_kprobe("ksys_unshare");
++	if (!ksu_ns_get_path_sym)
++		ksu_ns_get_path_sym = (ksu_ns_get_path_fn)ksu_lookup_symbol_kprobe("ns_get_path");
++	if (!ksu_mntns_operations_sym)
++		ksu_mntns_operations_sym =
++			(const struct proc_ns_operations *)ksu_lookup_symbol_kprobe("mntns_operations");
++
++	if (!ksu_path_mount_sym || !ksu_ksys_unshare_sym)
++		pr_warn("ksu: mount namespace symbols unavailable, su mount handling degraded\n");
++}
+ 
+ // global mode , need CAP_SYS_ADMIN and CAP_SYS_CHROOT to perform setns
+ static void ksu_mnt_ns_global(void)
+@@ -68,12 +101,27 @@ try_setns:
+         goto out;
+     }
+     struct path ns_path;
+-    long ret = ns_get_path(&ns_path, pid1_task, &mntns_operations);
+-    put_task_struct(pid1_task);
+-    if (ret) {
+-        pr_warn("failed get path for init mount namespace: %ld\n", ret);
++    long ret;
++    /*
++     * ns_get_path() returns a struct path * (or an ERR_PTR) on 5.x/6.x, not a
++     * long, so `long ret = ns_get_path(...)` truncated the pointer and made the
++     * error check meaningless.
++     */
++    ksu_mnt_ns_resolve_symbols();
++    if (!ksu_ns_get_path_sym || !ksu_mntns_operations_sym) {
++        pr_warn("ns_get_path/mntns_operations unavailable, cannot switch to init mount namespace\n");
++        put_task_struct(pid1_task);
+         goto out;
+     }
++    {
++        struct path *ns_ret = ksu_ns_get_path_sym(&ns_path, pid1_task, ksu_mntns_operations_sym);
++        put_task_struct(pid1_task);
++        if (IS_ERR_OR_NULL(ns_ret)) {
++            ret = ns_ret ? PTR_ERR(ns_ret) : -ENOENT;
++            pr_warn("failed get path for init mount namespace: %ld\n", ret);
++            goto out;
++        }
++    }
+     struct file *ns_file = dentry_open(&ns_path, O_RDONLY, ksu_cred);
+ 
+     path_put(&ns_path);
+@@ -103,7 +151,8 @@ try_setns:
+         struct path new_pwd;
+         int err = kern_path(pwd_path, 0, &new_pwd);
+         if (!err) {
+-            set_fs_pwd(current->fs, &new_pwd);
++            if (ksu_set_fs_pwd_sym)
++                ksu_set_fs_pwd_sym(current->fs, &new_pwd);
+             path_put(&new_pwd);
+         } else {
+             pr_warn("restore pwd failed: %d, path: %s\n", err, pwd_path);
+@@ -116,7 +165,13 @@ out:
+ // individual mode , need CAP_SYS_ADMIN to perform unshare and remount
+ static void ksu_mnt_ns_individual(void)
+ {
+-    long ret = ksys_unshare(CLONE_NEWNS);
++    ksu_mnt_ns_resolve_symbols();
++    if (!ksu_ksys_unshare_sym) {
++        pr_warn("ksys_unshare unavailable, cannot unshare mount namespace\n");
++        return;
++    }
++
++    long ret = ksu_ksys_unshare_sym(CLONE_NEWNS);
+     if (ret) {
+         pr_warn("call ksys_unshare failed: %ld\n", ret);
+         return;
+@@ -125,7 +180,8 @@ static void ksu_mnt_ns_individual(void)
+     // make root mount private
+     struct path root_path;
+     get_fs_root(current->fs, &root_path);
+-    int pm_ret = path_mount(NULL, &root_path, NULL, MS_PRIVATE | MS_REC, NULL);
++    int pm_ret = ksu_path_mount_sym ?
++                     ksu_path_mount_sym(NULL, &root_path, NULL, MS_PRIVATE | MS_REC, NULL) : -ENOSYS;
+     path_put(&root_path);
+ 
+     if (pm_ret < 0) {
+diff --git a/kernel/policy/app_profile.c b/kernel/policy/app_profile.c
+index 10d0326..d7c0d6e 100644
+--- a/kernel/policy/app_profile.c
++++ b/kernel/policy/app_profile.c
+@@ -19,6 +19,31 @@
+ #include "infra/su_mount_ns.h"
+ #include "hook/tp_marker.h"
+ 
++/*
++ * seccomp_filter_release(), alloc_uid() and set_cred_ucounts() are internal
++ * kernel helpers that are not exported to modules.  Resolve them once at
++ * runtime instead of referencing them directly (which would not link).
++ */
++typedef void (*ksu_seccomp_filter_release_fn)(struct task_struct *tsk);
++typedef struct user_struct *(*ksu_alloc_uid_fn)(kuid_t uid);
++typedef int (*ksu_set_cred_ucounts_fn)(struct cred *new);
++
++static ksu_seccomp_filter_release_fn ksu_seccomp_filter_release_sym;
++static ksu_alloc_uid_fn ksu_alloc_uid_sym;
++static ksu_set_cred_ucounts_fn ksu_set_cred_ucounts_sym;
++
++static void ksu_app_profile_resolve_symbols(void)
++{
++	if (!ksu_seccomp_filter_release_sym)
++		ksu_seccomp_filter_release_sym =
++			(ksu_seccomp_filter_release_fn)ksu_lookup_symbol_kprobe("seccomp_filter_release");
++	if (!ksu_alloc_uid_sym)
++		ksu_alloc_uid_sym = (ksu_alloc_uid_fn)ksu_lookup_symbol_kprobe("alloc_uid");
++	if (!ksu_set_cred_ucounts_sym)
++		ksu_set_cred_ucounts_sym =
++			(ksu_set_cred_ucounts_fn)ksu_lookup_symbol_kprobe("set_cred_ucounts");
++}
++
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+ static struct group_info root_groups = { .usage = REFCOUNT_INIT(2) };
+ #else
+@@ -64,8 +89,6 @@ void setup_groups(struct root_profile *profile, struct cred *cred)
+     put_group_info(group_info);
+ }
+ 
+-void seccomp_filter_release(struct task_struct *tsk);
+-
+ // https://cs.android.com/android/_/android/kernel/common/+/5346453405bf12d7ed6003f45dd47b71744fe1be
+ // Some 15-6.6 kernel have this backport while others don't have, e.g. Pixel 10
+ // See also:
+@@ -74,6 +97,8 @@ void seccomp_filter_release(struct task_struct *tsk);
+     LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+ 
+ #if NEED_BACKPORT_COMPAT
++/* Upper bound for scanning seccomp_filter_release() without kallsyms sizes. */
++#define SEccomp_SCAN_MAX 256UL
+ static bool has_call_to_spin_lock = false;
+ #endif
+ 
+@@ -118,7 +143,9 @@ static void disable_seccomp(void)
+     fake->sighand = NULL;
+ #endif
+ 
+-    seccomp_filter_release(fake);
++    ksu_app_profile_resolve_symbols();
++    if (ksu_seccomp_filter_release_sym)
++        ksu_seccomp_filter_release_sym(fake);
+     kfree(fake);
+ }
+ 
+@@ -173,7 +200,8 @@ int escape_with_root_profile(void)
+      * https://github.com/torvalds/linux/blob/v5.14/kernel/sys.c
+      * https://github.com/torvalds/linux/blob/v5.14/kernel/cred.c
+      */
+-    new_user = alloc_uid(cred->uid);
++    ksu_app_profile_resolve_symbols();
++    new_user = ksu_alloc_uid_sym ? ksu_alloc_uid_sym(cred->uid) : NULL;
+     if (!new_user) {
+         ret = -ENOMEM;
+         goto out_abort_creds;
+@@ -186,7 +214,7 @@ int escape_with_root_profile(void)
+     // https://github.com/torvalds/linux/commit/905ae01c4ae2ae3df05bb141801b1db4b7d83c61#diff-ff6060da281bd9ef3f24e17b77a9b0b5b2ed2d7208bb69b29107bee69732bd31
+     // on older kernels, per-UID process accounting lives in user_struct.
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+-    if (set_cred_ucounts(cred)) {
++    if (ksu_set_cred_ucounts_sym && ksu_set_cred_ucounts_sym(cred)) {
+         goto out_abort_creds;
+     }
+ #endif
+@@ -244,8 +272,15 @@ void __init ksu_app_profile_init(void)
+     int ret;
+     void *raw_spin_lock_irq_sym = find_kernel_symbol_exact("_raw_spin_lock_irq");
+     void *seccomp_filter_release_sym = find_kernel_symbol_exact("seccomp_filter_release");
+-    ret = kallsyms_lookup_size_offset(seccomp_filter_release_sym, &size, NULL);
+-    if (!ret || !size) {
++    /*
++     * kallsyms_lookup_size_offset() is not exported to modules, so the exact
++     * extent of the function cannot be queried from an out-of-tree build.  A
++     * conservative upper bound is used instead; scan_call_to() validates what
++     * it decodes, so over-scanning is harmless.
++     */
++    ret = seccomp_filter_release_sym ? 0 : -ENOENT;
++    size = SEccomp_SCAN_MAX;
++    if (!seccomp_filter_release_sym) {
+         pr_err("failed to get size of seccomp_filter_release: %d, use 128\n", ret);
+         size = 128;
+     }
+diff --git a/kernel/runtime/boot_event.c b/kernel/runtime/boot_event.c
+index 91848e6..1d18174 100644
+--- a/kernel/runtime/boot_event.c
++++ b/kernel/runtime/boot_event.c
+@@ -1,4 +1,5 @@
+ #include "feature/selinux_hide.h"
++#include "infra/symbol_resolver.h"
+ #include <linux/err.h>
+ #include <linux/fs.h>
+ #include <linux/namei.h>
+@@ -36,7 +37,12 @@ void on_post_fs_data(void)
+     ksu_feature_apply_forced();
+ }
+ 
+-extern void ext4_unregister_sysfs(struct super_block *sb);
++/*
++ * ext4_unregister_sysfs() lives in the ext4 module and is not exported, so it
++ * cannot be referenced from an out-of-tree module.  Resolve it at runtime.
++ */
++typedef void (*ksu_ext4_unregister_sysfs_fn)(struct super_block *sb);
++static ksu_ext4_unregister_sysfs_fn ksu_ext4_unregister_sysfs_sym;
+ 
+ int nuke_ext4_sysfs(const char *mnt)
+ {
+@@ -54,7 +60,11 @@ int nuke_ext4_sysfs(const char *mnt)
+         return -EINVAL;
+     }
+ 
+-    ext4_unregister_sysfs(path.dentry->d_inode->i_sb);
++    if (!ksu_ext4_unregister_sysfs_sym)
++        ksu_ext4_unregister_sysfs_sym =
++            (ksu_ext4_unregister_sysfs_fn)ksu_lookup_symbol_kprobe("ext4_unregister_sysfs");
++    if (ksu_ext4_unregister_sysfs_sym)
++        ksu_ext4_unregister_sysfs_sym(path.dentry->d_inode->i_sb);
+     path_put(&path);
+     return 0;
+ }
+diff --git a/kernel/runtime/ksud_integration.c b/kernel/runtime/ksud_integration.c
+index e8c6994..9c9476d 100644
+--- a/kernel/runtime/ksud_integration.c
++++ b/kernel/runtime/ksud_integration.c
+@@ -1,4 +1,5 @@
+ #include "feature/selinux_hide.h"
++#include "ksu_compat.h"
+ #include <linux/rcupdate.h>
+ #include <linux/slab.h>
+ #include <linux/mm.h>
+diff --git a/kernel/sulog/event.c b/kernel/sulog/event.c
+index 51d6fa8..fcccbc2 100644
+--- a/kernel/sulog/event.c
++++ b/kernel/sulog/event.c
+@@ -9,6 +9,8 @@
+ #include <linux/string.h>
+ #include <linux/uaccess.h>
+ 
++#include "ksu_compat.h"
++
+ #include <linux/version.h>
+ #if defined(__x86_64__) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
+ #include <linux/mm.h>
+diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
+index 82ac700..335f091 100644
+--- a/kernel/supercall/dispatch.c
++++ b/kernel/supercall/dispatch.c
+@@ -18,6 +18,7 @@
+ #include "infra/file_wrapper.h"
+ #include "hook/tp_marker.h"
+ #include "policy/app_profile.h"
++#include "infra/symbol_resolver.h"
+ #include "sulog/event.h"
+ #include "sulog/fd.h"
+ #include "supercall/supercall.h"
+@@ -657,6 +658,29 @@ static int add_try_umount(void __user *arg)
+     return 0;
+ }
+ 
++/*
++ * tasklist_lock and change_pid() are not exported to modules.  change_pid() is
++ * resolved at runtime and the tasklist write lock is taken through the
++ * resolved address of tasklist_lock.
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
++typedef void (*ksu_change_pid_fn)(struct pid *pids[], struct task_struct *p, enum pid_type type,
++                                  struct pid *pid);
++static ksu_change_pid_fn ksu_change_pid_sym;
++#else
++typedef void (*ksu_change_pid_fn)(struct task_struct *p, enum pid_type type, struct pid *pid);
++static ksu_change_pid_fn ksu_change_pid_sym;
++#endif
++static rwlock_t *ksu_tasklist_lock_sym;
++
++static void ksu_tasklist_resolve(void)
++{
++    if (!ksu_change_pid_sym)
++        ksu_change_pid_sym = (ksu_change_pid_fn)ksu_lookup_symbol_kprobe("change_pid");
++    if (!ksu_tasklist_lock_sym)
++        ksu_tasklist_lock_sym = (rwlock_t *)ksu_lookup_symbol_kprobe("tasklist_lock");
++}
++
+ static int do_set_init_pgrp(void __user *arg)
+ {
+     int err;
+@@ -664,7 +688,13 @@ static int do_set_init_pgrp(void __user *arg)
+     struct pid *pids[PIDTYPE_MAX] = { 0 };
+ #endif
+ 
+-    write_lock_irq(&tasklist_lock);
++    ksu_tasklist_resolve();
++    if (!ksu_tasklist_lock_sym || !ksu_change_pid_sym) {
++        pr_err("ksu: tasklist_lock/change_pid unavailable, cannot set init pgrp\n");
++        return -ENOSYS;
++    }
++
++    write_lock_irq(ksu_tasklist_lock_sym);
+     struct task_struct *p = current->group_leader;
+     struct pid *init_group = task_pgrp(&init_task);
+ 
+@@ -675,14 +705,14 @@ static int do_set_init_pgrp(void __user *arg)
+     err = 0;
+     if (task_pgrp(p) != init_group) {
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+-        change_pid(pids, p, PIDTYPE_PGID, init_group);
++        ksu_change_pid_sym(pids, p, PIDTYPE_PGID, init_group);
+ #else
+-        change_pid(p, PIDTYPE_PGID, init_group);
++        ksu_change_pid_sym(p, PIDTYPE_PGID, init_group);
+ #endif
+     }
+ 
+ out:
+-    write_unlock_irq(&tasklist_lock);
++    write_unlock_irq(ksu_tasklist_lock_sym);
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+     free_pids(pids);
+ #endif

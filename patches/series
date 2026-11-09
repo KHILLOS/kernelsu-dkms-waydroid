@@ -1,4 +1,6 @@
 0001-kconfig-add-waydroid-options.patch
-0002-kbuild-waydroid-flags-and-dkms-version.patch
-0003-file-wrapper-selinux-guard.patch
-0004-selinux-objsec-guard.patch
+0002-kbuild-dkms-version-and-selinux-objects.patch
+0003-symbol-resolver-kprobe-and-compat-header.patch
+0004-selinux-noop-backend.patch
+0005-file-wrapper-selinux-guard.patch
+0006-resolve-non-exported-kernel-symbols.patch

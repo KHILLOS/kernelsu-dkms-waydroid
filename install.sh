@@ -27,6 +27,14 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Check required tools
+for tool in dkms git patch modinfo depmod modprobe; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+        log_err "Required tool not found: ${tool}"
+        exit 1
+    fi
+done
+
 # Check kernel headers
 KVERSION=$(uname -r)
 if [ ! -d "/lib/modules/${KVERSION}/build" ]; then
@@ -53,24 +61,27 @@ done
 if grep -q "^CONFIG_SECURITY_SELINUX=y" "/boot/config-${KVERSION}" 2>/dev/null || \
    zcat "/proc/config.gz" 2>/dev/null | grep -q "^CONFIG_SECURITY_SELINUX=y"; then
     log_ok "SELinux support detected in kernel"
-    : SELINUX_AVAILABLE=1
 else
     log_warn "SELinux not in kernel config - CONFIG_KSU_SELINUX will be disabled"
-    : SELINUX_AVAILABLE=0
 fi
 
 # Check for x86_64
 if [ "$(uname -m)" = "x86_64" ]; then
     log_ok "x86_64 architecture - CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER will be enabled"
-    : X86_64=1
 else
-    log_info "Non-x86 architecture - CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER not applicable"
-    : X86_64=0
+    log_err "Only x86_64 is supported by this DKMS package"
+    exit 1
 fi
 
 # Fetch and prepare source
 log_info "Fetching KernelSU source..."
-./fetch-kernelsu.sh
+"${SCRIPT_DIR}/fetch-kernelsu.sh"
+
+# Fail early if the fetched dkms.conf still contains unresolved placeholders
+if grep -q "@PKGVER@\|@KSU_GIT_VERSION@" "/usr/src/kernelsu-${KERNELSU_VERSION}/dkms.conf" 2>/dev/null; then
+    log_err "dkms.conf still contains unsubstituted placeholders"
+    exit 1
+fi
 
 # Add to DKMS (remove any previous copy first so re-runs work)
 log_info "Adding to DKMS..."
@@ -99,13 +110,46 @@ if [ -f "${SCRIPT_DIR}/modloader" ]; then
     install -Dm755 "${SCRIPT_DIR}/modloader" /usr/bin/modloader
 else
     log_warn "modloader not found - downloading..."
-    curl -L "https://github.com/shadichy/modloader/releases/download/v2.0.0/modloader-x86_64-glibc" -o /tmp/modloader
+    MODLOADER_URL="https://github.com/shadichy/modloader/releases/download/v2.0.0/modloader-x86_64-glibc"
+    if ! curl -fL --retry 3 -o /tmp/modloader "${MODLOADER_URL}"; then
+        log_err "Failed to download modloader from ${MODLOADER_URL}"
+        log_err "Download it manually and place it at ${SCRIPT_DIR}/modloader, then re-run."
+        exit 1
+    fi
     install -Dm755 /tmp/modloader /usr/bin/modloader
 fi
 
 # Update module dependencies
 log_info "Updating module dependencies..."
 depmod -a "${KVERSION}"
+
+# Verify the module actually links: every undefined symbol must be provided by
+# the kernel.  A .ko with unresolved symbols builds fine (if modpost warnings are
+# tolerated) but fails to load with "Unknown symbol".
+log_info "Verifying module linkage..."
+KO_PATH=$(dkms status -m "${MODULE_NAME}" -v "${KERNELSU_VERSION}" >/dev/null 2>&1; \
+          find "/lib/modules/${KVERSION}" "/usr/lib/modules/${KVERSION}" -name "kernelsu.ko*" 2>/dev/null | head -n1)
+if [ -n "${KO_PATH}" ]; then
+    TMPKO=$(mktemp /tmp/kernelsu-XXXXXX.ko)
+    case "${KO_PATH}" in
+        *.xz) xz -dc "${KO_PATH}" > "${TMPKO}" ;;
+        *.zst) zstd -dc "${KO_PATH}" > "${TMPKO}" ;;
+        *.gz) gzip -dc "${KO_PATH}" > "${TMPKO}" ;;
+        *) cp "${KO_PATH}" "${TMPKO}" ;;
+    esac
+    MISSING=$(nm -u "${TMPKO}" 2>/dev/null | awk '{print $2}' | while read -r sym; do
+        [ -n "${sym}" ] || continue
+        grep -qw "${sym}" "/lib/modules/${KVERSION}/build/Module.symvers" 2>/dev/null || echo "${sym}"
+    done | head -20)
+    rm -f "${TMPKO}"
+    if [ -n "${MISSING}" ]; then
+        log_warn "Module references symbols not listed in this kernel's Module.symvers:"
+        echo "${MISSING}" | sed 's/^/      /'
+        log_warn "(built-in kernel symbols are not listed there, so this is informational)"
+    else
+        log_ok "No obviously unresolved symbols"
+    fi
+fi
 
 # Verify module
 log_info "Verifying module..."

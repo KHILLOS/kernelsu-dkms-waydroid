@@ -149,6 +149,41 @@ Build KernelSU v3.3.1 as DKMS module for Waydroid root access on regular Linux h
 - Safe rollback if something breaks
 - Follows "backup before edit" principle
 
+
+---
+
+## Bug-fix round: out-of-tree linkage (verified on kernel 6.12)
+
+The original series produced a module that **built** but could never **load**.
+Root cause: a DKMS module may only reference `EXPORT_SYMBOL()`'d symbols, while
+KernelSU is written to be compiled *inside* the kernel tree and uses internal
+helpers freely. `KBUILD_MODPOST_WARN=1` in `dkms.conf` turned the resulting
+"undefined symbol" errors into warnings, so DKMS reported success.
+
+Measured against `linux-headers-6.12.115` (Debian 13):
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `fatal error: objsec.h: No such file or directory` when `CONFIG_KSU_SELINUX=y` | `objsec.h` / `ss/policydb.h` are kernel-private and not shipped by any distro | `selinux_none.c` no-op backend; build now aborts with an actionable message if `CONFIG_KSU_SELINUX=y` |
+| `undefined! kallsyms_lookup_name`, `kallsyms_on_each_symbol`, `kallsyms_on_each_match_symbol`, `kallsyms_lookup_size_offset` | Not `EXPORT_SYMBOL`'d (none of `kallsyms.c` is) | Resolver rewritten on top of `register_kprobe()`, which *is* exported and resolves by name |
+| `undefined! path_mount, path_umount, set_fs_pwd, ksys_unshare, ns_get_path, tasklist_lock, change_pid, find_task_by_vpid, alloc_uid, set_cred_ucounts, seccomp_filter_release, init_mm, mntns_operations, ext4_unregister_sysfs, __x64_sys_close, __x64_sys_setns, __tracepoint_sys_enter, strncpy_from_user_nofault, copy_to_kernel_nofault` | Internal helpers | Runtime resolution via the resolver; `close_fd()` / `strncpy_from_user()` / `copy_from_kernel_nofault()` where an exported equivalent exists |
+| `CONFIG_KSU_SELINUX=n` left `handle_sepolicy`, `getenforce`, `is_zygote`, `ksu_selinux_hide_*` etc. undefined | Kbuild skipped the objects but callers remained | `selinux_none.c` supplies every symbol |
+| `KSU_VERSION` became invalid | Git detection always fails in `/usr/src`, leaving `KSU_GIT_VERSION` empty | Out-of-tree builds require `KSU_GIT_VERSION` from `dkms.conf`; fallback fixed to `30000` |
+| `KSU_NEW_DCACHE_FLUSH` got a garbage value on non-arm64 | Probed an arm64-only header | Arch-guarded, defaults to `0` |
+| `ns_get_path()` result stored in a `long` | It returns `struct path *`, not `int` | Pointer + `IS_ERR_OR_NULL()` |
+| `load-kernelsu` could not load the `.ko.xz` DKMS installs | Decompression chosen from a glob that did not match | Suffix-based decompressor + dependency check |
+
+Verification performed:
+- `fetch-kernelsu.sh` → `dkms add` → `dkms build` → **0 modpost errors/warnings**, `kernelsu.ko` produced
+- `nm -u kernelsu.ko` contains **no** `ksu_*`/`selinux*`/`kallsyms*`/`tasklist_lock` references
+- `CONFIG_KSU_SELINUX=y` on distro headers now fails immediately with an explanatory message instead of a header-not-found error
+
+Trade-off introduced by patch 0004: with the no-op SELinux backend, KernelSU no
+longer moves its own processes into the `ksu` domain, `ksud`'s custom sepolicy
+rules are ignored (`handle_sepolicy()` returns `-EOPNOTSUPP`), and SELinux hiding
+is unavailable. Root escalation (uid/gid/capabilities) is unaffected. This is the
+only option for a DKMS module on a stock distro kernel.
+
 ---
 
 ## Rejected Alternatives

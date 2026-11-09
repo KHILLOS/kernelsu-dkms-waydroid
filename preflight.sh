@@ -66,7 +66,14 @@ run_check "CONFIG_MODULE_UNLOAD" check_config CONFIG_MODULE_UNLOAD
 run_check "CONFIG_KALLSYMS_ALL" check_config CONFIG_KALLSYMS_ALL
 
 # Recommended configs
-run_check "CONFIG_SECURITY_SELINUX" check_config CONFIG_SECURITY_SELINUX || log_warn "SELinux not enabled - CONFIG_KSU_SELINUX will be disabled"
+# CONFIG_KSU_SELINUX is always "n" for DKMS builds (the SELinux backend needs
+# kernel-private headers no distro ships), so the host's SELinux state only
+# affects how root escalation is labelled - it is informational, not a failure.
+if check_config CONFIG_SECURITY_SELINUX; then
+    log_info "Host kernel has SELinux; note this build uses the no-op KSU SELinux backend"
+else
+    log_info "Host kernel has no SELinux; the no-op KSU SELinux backend is used"
+fi
 run_check "CONFIG_SECURITY" check_config CONFIG_SECURITY
 run_check "CONFIG_LSM" check_config CONFIG_LSM
 run_check "CONFIG_HAVE_KPROBES" check_config CONFIG_HAVE_KPROBES
