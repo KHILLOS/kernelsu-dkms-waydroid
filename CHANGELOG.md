@@ -11,6 +11,26 @@ Upstream base: [tiann/KernelSU](https://github.com/tiann/KernelSU) `v3.3.1`
 
 ### Fixed
 
+- **Six-kernel support.** The module now builds and passes linkage
+  verification against Ubuntu 22.04 (5.15), Debian 12 (6.1), Ubuntu 24.04
+  (6.8), Debian 13 (6.12), Ubuntu 25.10 (6.17) and Ubuntu 26.04 (7.0).  A
+  container matrix in CI (`.github/workflows/build.yml`) keeps it that way.
+- **`anon_inode_getfile_secure` is not exported on 6.1-6.7**, so referencing it
+  left an unresolved symbol at modpost time.  Those kernels now use the
+  portable local implementation; only 6.8+ uses `anon_inode_create_getfile`.
+- **`security_inode_init_security_anon` is unavailable before 6.2.** The
+  wrapper inode is created without a security context there instead of failing
+  to compile.
+- **`free_pids()` (6.15+) and `free_uid()` (exported only from 6.12)** are no
+  longer linked against directly; both are resolved at runtime next to
+  `change_pid()`, so 7.0 links and pre-6.12 kernels link.
+- **LSM hook storage is feature-detected, not version-guessed.** Distributions
+  backport the 6.12 static-call rework and its later removal independently, so
+  `LINUX_VERSION_CODE` was the wrong discriminator: Ubuntu 5.15 already uses the
+  6.8 hook-list layout, and Ubuntu 6.17 is already past the static-call table.
+  `Kbuild` now probes the installed `linux/lsm_hooks.h` and selects the hook
+  heads, static calls, or the no-op backend accordingly.
+- **README badge** pointed at the pre-migration repository path.
 - **The module built but could never load.** `dkms.conf` passed
   `KBUILD_MODPOST_WARN=1`, which downgrades modpost's "undefined symbol"
   errors to warnings. DKMS reported success while the `.ko` retained 10

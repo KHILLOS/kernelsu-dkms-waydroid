@@ -1,15 +1,40 @@
 # KernelSU DKMS for Waydroid
 
-[![build](https://github.com/yagyansh-chaudhary/kernelsu-dkms-waydroid/actions/workflows/build.yml/badge.svg)](https://github.com/yagyansh-chaudhary/kernelsu-dkms-waydroid/actions/workflows/build.yml)
+[![build](https://github.com/KHILLOS/kernelsu-dkms-waydroid/actions/workflows/build.yml/badge.svg)](https://github.com/KHILLOS/kernelsu-dkms-waydroid/actions/workflows/build.yml)
 [![license: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
 Build and install the official [KernelSU](https://github.com/tiann/KernelSU)
 (v3.3.1) as an **out-of-tree DKMS module** on a regular Linux host kernel,
 giving root (`su`) access inside Waydroid containers.
 
-> **Verified on:** `linux-headers-6.12.115` (Debian 13), x86_64 —
-> `build.sh --clean` → `dkms install` → 0 modpost errors, 0 unresolved symbols.
-> Only x86_64 hosts are supported.
+> **Verified on six kernel generations, x86_64** — Ubuntu 22.04 (5.15),
+> Debian 12 (6.1), Ubuntu 24.04 (6.8), Debian 13 (6.12), Ubuntu 25.10 (6.17) and
+> Ubuntu 26.04 (7.0): `build.sh --clean` → `dkms install` → 0 modpost errors,
+> 0 unresolved symbols on every one. Only x86_64 hosts are supported.
+
+### Supported kernels
+
+The module is built against the headers of whatever kernel DKMS targets, and it
+adapts to that kernel's actual APIs rather than to a version number — distro
+backports mean a 5.15 Ubuntu kernel can already carry the 6.8 LSM/hook layout
+while an Ubuntu 6.17 kernel is already past the removal of the static-call
+table.
+
+| Distribution | Kernel tested | LSM hook storage | Result |
+|---|---|---|---|
+| Ubuntu 22.04 | `5.15.0-203-generic` | hook heads (`lsmid` backport) | builds, uses LSM hooking |
+| Debian 12 | `6.1.0-54-amd64` | hook heads | builds, uses LSM hooking |
+| Ubuntu 24.04 | `6.8.0-149-generic` | hook heads (`lsmid`) | builds, uses LSM hooking |
+| Debian 13 | `6.12.116+deb13-amd64` | static calls | builds, uses LSM hooking |
+| Ubuntu 25.10 | `6.17.0-41-generic` | hook heads, static calls removed | builds, uses LSM hooking |
+| Ubuntu 26.04 | `7.0.0-43-generic` | static calls | builds, uses LSM hooking |
+
+Kernels ≤ 5.15 whose headers are older than the LSM `lsmid` rework build with
+LSM hooking compiled out (see `Kbuild`'s `KSU_LSM_LAYOUT_*` probe); kernels that
+removed the hook internals from their public headers build with a no-op LSM
+backend that reports `-EOPNOTSUPP` instead of guessing at opaque structures.
+Everything else in the module — `su` redirection, supercalls, allowlist,
+profiles, sulog — is unaffected.
 
 ## Quick Start
 

@@ -211,6 +211,47 @@ only option for a DKMS module on a stock distro kernel.
 
 ---
 
+## Multi-Kernel Support (measured 2026-11-10)
+
+Every supported kernel was built in a container from its distribution's real
+headers, through `build.sh`, not just `make modules`.
+
+| Image | Kernel | LSM hook storage in headers | Outcome |
+|---|---|---|---|
+| `ubuntu:22.04` | `5.15.0-203-generic` | `security_hook_heads` + `lsmid` backport | pass (hook heads) |
+| `debian:12` | `6.1.0-54-amd64` | `security_hook_heads` + `char *lsm` | pass (hook heads) |
+| `ubuntu:24.04` | `6.8.0-149-generic` | `security_hook_heads` + `lsmid` | pass (hook heads) |
+| `debian:13` | `6.12.116+deb13-amd64` | `struct lsm_static_call` | pass (static calls) |
+| `ubuntu:25.10` | `6.17.0-41-generic` | `security_hook_heads`, static calls removed | pass (hook heads) |
+| `ubuntu:26.04` | `7.0.0-43-generic` | `struct lsm_static_call` | pass (static calls) |
+
+### Symptom → cause → fix
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ERROR: modpost: "anon_inode_getfile_secure" undefined` (6.1) | Exists but is not `EXPORT_SYMBOL`'d before 6.8 | Use the portable local implementation below 6.8 (patch 0007) |
+| `implicit declaration of security_inode_init_security_anon` (6.1) | Not declared before 6.2 | Skip the security context below 6.2 (patch 0007) |
+| `ERROR: modpost: "free_pids" undefined` (7.0) | Internal, never exported | Resolve at runtime like `change_pid` (patch 0008) |
+| `ERROR: modpost: "free_uid" undefined` (≤ 6.11) | Exported only from 6.12 | Resolve at runtime (patch 0008) |
+| `'struct security_hook_list' has no member named 'lsm'` (5.15, 6.8) | 6.8 renamed it to `lsmid`, backported into 5.15 | Probe the header, pick `lsmid` or `lsm` (patch 0009) |
+| `invalid use of undefined type 'struct lsm_static_call'` (6.17) | Ubuntu backported the removal of the static-call table | Probe: fall back to hook heads (patch 0009) |
+
+### Decisions
+
+- **Feature detection over version macros.** The LSM layout, the `lsmid`
+  rename, and the export status of several helpers are all distro-dependent.
+  Guessing from `LINUX_VERSION_CODE` produced a matrix where only one kernel of
+  six built. `Kbuild` now greps the installed header and passes exactly one of
+  `KSU_LSM_LAYOUT_HEADS`, `KSU_LSM_LAYOUT_SCALL` or nothing (unsupported).
+- **A degraded LSM backend is better than no module.** On kernels whose headers
+  no longer describe the hook storage, `ksu_lsm_hook()` returns `-EOPNOTSUPP`
+  and logs; loading continues and every other subsystem works.
+- **Optional helpers never dereference NULL.** Every runtime-resolved symbol is
+  guarded; when one is missing the affected optimisation is skipped and the
+  reference is leaked rather than the kernel being crashed.
+
+---
+
 ## Future Considerations
 
 1. **Upstream Patches**: Submit 0001 and 0002 to tiann/KernelSU for official Waydroid support
