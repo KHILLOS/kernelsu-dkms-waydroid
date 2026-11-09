@@ -48,8 +48,22 @@ dkms remove -m "${MODULE_NAME}" -v "${KERNELSU_VERSION}" --all >/dev/null 2>&1 |
 dkms add -m "${MODULE_NAME}" -v "${KERNELSU_VERSION}" >/dev/null || die "dkms add failed"
 
 info "Building for ${KVERSION}..."
-dkms build -m "${MODULE_NAME}" -v "${KERNELSU_VERSION}" -k "${KVERSION}" \
-    --kernelsourcedir "${KDIR}" 2>&1 | tail -3
+BUILD_LOG=$(mktemp)
+if ! dkms build -m "${MODULE_NAME}" -v "${KERNELSU_VERSION}" -k "${KVERSION}" \
+        --kernelsourcedir "${KDIR}" 2>&1 | tee "${BUILD_LOG}" | tail -5; then
+    echo
+    echo -e "${RED}[!] DKMS build failed. Last errors from make.log:${RESET}" >&2
+    MAKE_LOG=$(find "/var/lib/dkms/${MODULE_NAME}/${KERNELSU_VERSION}" -name make.log 2>/dev/null | head -1)
+    if [ -n "${MAKE_LOG}" ]; then
+        grep -E "error:|fatal error|Error [0-9]" "${MAKE_LOG}" | tail -20 | sed 's/^/    /' >&2
+        echo -e "${RED}[!] Full log: ${MAKE_LOG}${RESET}" >&2
+    else
+        tail -20 "${BUILD_LOG}" | sed 's/^/    /' >&2
+    fi
+    rm -f "${BUILD_LOG}"
+    exit 1
+fi
+rm -f "${BUILD_LOG}"
 ok "Build finished"
 
 info "Verifying module linkage..."
