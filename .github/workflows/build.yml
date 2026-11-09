@@ -103,15 +103,34 @@ jobs:
             exit 1
           fi
 
-      - name: Every helper has a definition
+      - name: No-op SELinux backend defines every required helper
         run: |
-          # The no-op SELinux backend must define every symbol the module calls;
-          # this catches a missing object before it becomes a link failure.
+          # The no-op backend must define every symbol the rest of the module
+          # calls, otherwise the build fails with "undefined!" - or, worse,
+          # produces an unloadable .ko.  Definitions inside a patch are prefixed
+          # with '+', so match that explicitly.
+          P=patches/0004-selinux-noop-backend.patch
+          required="setup_selinux setenforce getenforce cache_sid is_task_ksu_domain
+                    is_ksu_domain is_zygote is_init is_adbd apply_kernelsu_rules
+                    handle_sepolicy setup_ksu_cred escape_to_root_for_adb_root
+                    ksu_selinux_hide_init ksu_selinux_hide_exit
+                    ksu_selinux_hide_drop_backup_if_unused
+                    ksu_selinux_hide_handle_second_stage
+                    ksu_selinux_hide_handle_post_fs_data"
           missing=0
-          for sym in $(grep -oP '^\s*(void|bool|int)\s+\K(ksu_selinux_hide_\w+|handle_sepolicy|getenforce|setenforce|is_zygote|is_ksu_domain|is_task_ksu_domain|is_init|is_adbd|cache_sid|setup_selinux|setup_ksu_cred|apply_kernelsu_rules|escape_to_root_for_adb_root)' patches/0004-selinux-noop-backend.patch | sort -u); do
-            if ! grep -q "^$sym(" patches/0004-selinux-noop-backend.patch; then
-              echo "::warning::no no-op definition found for $sym"
+          for sym in $required; do
+            # A definition appears in the patch as "+"+<return type> <name>("
+            if ! grep -qE "^\\+[A-Za-z_][A-Za-z_0-9 *]*[ *]${sym}\\(" "$P"; then
+              echo "::error::$P does not define $sym"
               missing=1
             fi
           done
+          # also the exported data symbol referenced from file_wrapper.c
+          if ! grep -qE '^\\+u32 ksu_file_sid' "$P"; then
+            echo "::error::$P does not define ksu_file_sid"
+            missing=1
+          fi
+          if [ "$missing" -eq 0 ]; then
+            echo "all $(echo $required | wc -w) helpers + ksu_file_sid are defined"
+          fi
           exit $missing

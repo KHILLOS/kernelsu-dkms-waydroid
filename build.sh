@@ -17,7 +17,7 @@ MODULE_NAME="kernelsu"
 KERNELSU_VERSION="${KERNELSU_VERSION:-3.3.1}"
 KVERSION="${KVERSION_OVERRIDE:-$(uname -r)}"
 
-RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'; RESET='\033[0m'
+RED='\033[1;31m'; GREEN='\033[1;32m'; BLUE='\033[1;34m'; RESET='\033[0m'
 info() { echo -e "${BLUE}[+]${RESET} $*"; }
 ok()   { echo -e "${GREEN}[✓]${RESET} $*"; }
 die()  { echo -e "${RED}[✗]${RESET} $*" >&2; exit 1; }
