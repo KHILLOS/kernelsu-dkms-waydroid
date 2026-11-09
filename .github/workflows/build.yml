@@ -110,6 +110,81 @@ jobs:
           path: /tmp/kernelsu.ko
           retention-days: 14
 
+  # Multi-kernel matrix: the module must compile and pass modpost against every
+  # kernel we claim to support.  Each entry is a distribution image whose
+  # packaged headers represent one upstream generation; the layout of the LSM
+  # hook storage differs between them, which is exactly what used to break.
+  kernel-matrix:
+    runs-on: ubuntu-latest
+    needs: patches
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:22.04
+            note: 5.15 (hook heads, lsmid backport)
+          - image: debian:12
+            note: 6.1 (hook heads)
+          - image: ubuntu:24.04
+            note: 6.8 (hook heads, lsmid)
+          - image: debian:13
+            note: 6.12 (static calls)
+          - image: ubuntu:25.10
+            note: 6.17 (hook heads, static calls removed)
+          - image: ubuntu:26.04
+            note: 7.0 (static calls)
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential dkms bc flex bison libelf-dev \
+            kmod xz-utils zstd git ca-certificates
+          # Debian tracks headers as linux-headers-amd64, Ubuntu as
+          # linux-headers-generic.
+          apt-get install -y --no-install-recommends linux-headers-generic \
+            || apt-get install -y --no-install-recommends linux-headers-amd64
+
+      - name: Resolve target kernel
+        run: |
+          # Containers get no /lib/modules/<ver>/build symlink, so the version
+          # has to come from /usr/src.  The -common package must be skipped.
+          KV=$(ls -1d /usr/src/linux-headers-*-generic \
+                        /usr/src/linux-headers-*[0-9]-amd64 \
+                        /usr/src/linux-headers-*+deb* 2>/dev/null \
+               | sed 's|.*/linux-headers-||' | grep -vE 'common$' \
+               | sort -V | tail -1)
+          test -n "$KV" || { echo "::error::no kernel headers found"; exit 1; }
+          echo "BUILD_KERNEL=$KV" >> "$GITHUB_ENV"
+          echo "target kernel: $KV (expected ${{ matrix.note }})"
+
+      - name: Build with the repository pipeline
+        run: ./build.sh --clean
+        env:
+          KVERSION_OVERRIDE: ${{ env.BUILD_KERNEL }}
+
+      - name: Show module info
+        run: |
+          KO=$(find /var/lib/dkms/kernelsu -name 'kernelsu.ko*' | head -1)
+          test -n "$KO" || { echo "::error::no module produced"; exit 1; }
+          echo "module: $KO"
+          case "$KO" in
+            *.xz) xz -dc "$KO" > /tmp/kernelsu.ko ;;
+            *.zst) zstd -dc "$KO" > /tmp/kernelsu.ko ;;
+            *) cp "$KO" /tmp/kernelsu.ko ;;
+          esac
+          modinfo /tmp/kernelsu.ko | sed -n '1,12p'
+
+      - name: Upload module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernelsu-ko-${{ env.BUILD_KERNEL }}
+          path: /tmp/kernelsu.ko
+          retention-days: 14
+
   # Negative test: the old configuration must be rejected by verify-build.sh.
   # This guards against a regression that reintroduces KBUILD_MODPOST_WARN or
   # drops an object from the build.
