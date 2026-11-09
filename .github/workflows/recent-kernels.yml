@@ -1,0 +1,36 @@
+# Informational, non-blocking: does the module also build on very new kernels?
+#
+# GitHub's ubuntu-latest now runs a 7.x kernel. KernelSU v3.3.1 predates the
+# syscall-table changes in 7.x, so this is NOT a supported configuration and
+# failure here does not gate anything. The point is to notice when it starts
+# working (or stops) without red X's on every master commit.
+name: recent-kernels
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"      # Mondays 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  runner-kernel:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential dkms bc flex bison libelf-dev \
+            linux-headers-$(uname -r) kmod xz-utils zstd
+
+      - name: Report kernel and attempt build
+        run: |
+          echo "### Runner kernel: \`$(uname -r)\`" >> "$GITHUB_STEP_SUMMARY"
+          if sudo ./build.sh --clean; then
+            echo "**Result: builds and verifies on this kernel.**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Result: does not build on this kernel** (expected for kernels newer than the upstream target; see the job log)." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
