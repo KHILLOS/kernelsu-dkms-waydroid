@@ -1,0 +1,12 @@
+# Patch series must survive checkouts untouched.
+patches/*.patch text eol=lf -whitespace
+patches/series  text eol=lf
+
+# Shell scripts must keep LF so they run on Linux.
+*.sh       text eol=lf
+load-kernelsu text eol=lf
+
+# Never let Git "helpfully" renormalise the generated sources.
+*.c   text eol=lf
+*.h   text eol=lf
+*.md  text eol=lf

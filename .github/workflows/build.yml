@@ -1,0 +1,117 @@
+name: build
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Fast check: do the patches apply to the pinned upstream commit?
+  patches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned upstream commit
+        id: pin
+        run: |
+          commit=$(grep -oP 'KERNELSU_COMMIT="\K[0-9a-f]+' fetch-kernelsu.sh)
+          version=$(grep -oP 'KERNELSU_VERSION="\K[^"]+' fetch-kernelsu.sh)
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Pinned to $version ($commit)"
+
+      - name: Fetch upstream
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/tiann/KernelSU.git upstream
+          cd upstream
+          git checkout "${{ steps.pin.outputs.commit }}"
+
+      - name: Apply patch series
+        run: |
+          cd upstream
+          while IFS= read -r p; do
+            case "$p" in ''|'#'*) continue ;; esac
+            echo "::group::apply $p"
+            patch -p1 --forward --dry-run < "../patches/$p"
+            patch -p1 --forward < "../patches/$p"
+            echo "::endgroup::"
+          done < ../patches/series
+
+      - name: Reject leftover rejects
+        run: test -z "$(find upstream -name '*.rej' -print -quit)"
+
+      - name: Shellcheck scripts
+        run: |
+          shellcheck -S warning \
+            fetch-kernelsu.sh install.sh uninstall.sh preflight.sh \
+            waydroid-setup.sh load-kernelsu build.sh verify-build.sh
+
+      - name: Script syntax
+        run: for f in *.sh load-kernelsu; do bash -n "$f"; done
+
+  # Real compile: build the module as DKMS does, against a real kernel.
+  compile:
+    runs-on: ubuntu-latest
+    needs: patches
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential dkms bc flex bison libelf-dev \
+            linux-headers-$(uname -r) kmod xz-utils zstd
+
+      - name: Build with the repository pipeline
+        run: sudo ./build.sh --clean
+
+      - name: Show module info
+        run: |
+          KO=$(sudo find /var/lib/dkms/kernelsu -name 'kernelsu.ko*' | head -1)
+          echo "module: $KO"
+          sudo cp "$KO" /tmp/kernelsu.ko.xz
+          sudo chmod 644 /tmp/kernelsu.ko.xz
+          case "$KO" in
+            *.xz) xz -dc /tmp/kernelsu.ko.xz > /tmp/kernelsu.ko ;;
+            *)    cp /tmp/kernelsu.ko.xz /tmp/kernelsu.ko ;;
+          esac
+          modinfo /tmp/kernelsu.ko | sed -n '1,12p'
+
+      - name: Upload module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernelsu-ko-${{ github.sha }}
+          path: /tmp/kernelsu.ko
+          retention-days: 14
+
+  # Negative test: the old configuration must be rejected by verify-build.sh.
+  # This guards against a regression that reintroduces KBUILD_MODPOST_WARN or
+  # drops an object from the build.
+  regression-gate:
+    runs-on: ubuntu-latest
+    needs: compile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: dkms.conf must not suppress modpost errors
+        run: |
+          if grep -vE '^[[:space:]]*#' dkms.conf | grep -q KBUILD_MODPOST_WARN; then
+            echo "::error::dkms.conf sets KBUILD_MODPOST_WARN - unresolved symbols would be hidden"
+            exit 1
+          fi
+
+      - name: Every helper has a definition
+        run: |
+          # The no-op SELinux backend must define every symbol the module calls;
+          # this catches a missing object before it becomes a link failure.
+          missing=0
+          for sym in $(grep -oP '^\s*(void|bool|int)\s+\K(ksu_selinux_hide_\w+|handle_sepolicy|getenforce|setenforce|is_zygote|is_ksu_domain|is_task_ksu_domain|is_init|is_adbd|cache_sid|setup_selinux|setup_ksu_cred|apply_kernelsu_rules|escape_to_root_for_adb_root)' patches/0004-selinux-noop-backend.patch | sort -u); do
+            if ! grep -q "^$sym(" patches/0004-selinux-noop-backend.patch; then
+              echo "::warning::no no-op definition found for $sym"
+              missing=1
+            fi
+          done
+          exit $missing

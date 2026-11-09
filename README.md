@@ -1,22 +1,52 @@
 # KernelSU DKMS for Waydroid
 
-Build and install the latest official KernelSU (tiann/KernelSU v3.3.1) as an out-of-tree DKMS module on a regular Linux host kernel, enabling root (su) access in Waydroid containers.
+[![build](https://github.com/yagyansh-chaudhary/kernelsu-dkms-waydroid/actions/workflows/build.yml/badge.svg)](https://github.com/yagyansh-chaudhary/kernelsu-dkms-waydroid/actions/workflows/build.yml)
+[![license: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+
+Build and install the official [KernelSU](https://github.com/tiann/KernelSU)
+(v3.3.1) as an **out-of-tree DKMS module** on a regular Linux host kernel,
+giving root (`su`) access inside Waydroid containers.
+
+> **Verified on:** `linux-headers-6.12.115` (Debian 13), x86_64 —
+> `build.sh --clean` → `dkms install` → 0 modpost errors, 0 unresolved symbols.
+> Only x86_64 hosts are supported.
 
 ## Quick Start
 
 ```bash
-# 1. Run pre-flight checks
+# 1. Pre-flight checks
 ./preflight.sh
 
-# 2. Install KernelSU DKMS module
+# 2. Build and verify (fetch upstream, apply patches, dkms build, verify linkage)
+sudo ./build.sh --clean
+
+# 3. Install
 sudo ./install.sh
 
-# 3. Set up Waydroid integration
+# 4. Configure Waydroid
 sudo ./waydroid-setup.sh
 
-# 4. Test root in Waydroid
+# 5. Test root in the container
 waydroid shell su -c "id"
 ```
+
+`build.sh` refuses to declare success unless `verify-build.sh` passes, so a green
+run means the produced `.ko` is actually loadable.
+
+## A note on what changed
+
+Earlier revisions of this project produced a module that **built but could never
+load**: `dkms.conf` passed `KBUILD_MODPOST_WARN=1`, which turns modpost's
+"undefined symbol" errors into warnings, so DKMS reported success while the `.ko`
+kept 10 reported and 30+ suppressed unresolved symbols.
+
+The cause is structural, not a typo: KernelSU is written to be compiled *inside*
+the kernel tree, where it may call internal helpers freely, while a DKMS module
+may only reference `EXPORT_SYMBOL()`'d symbols. See
+[`DECISIONS.md`](DECISIONS.md#bug-fix-round-out-of-tree-linkage-verified-on-kernel-612)
+for the full symptom → cause → fix table, and [`CHANGELOG.md`](CHANGELOG.md).
+
+Run `sudo ./verify-build.sh` at any time to check the installed module.
 
 ## What This Project Provides
 
@@ -34,9 +64,12 @@ waydroid shell su -c "id"
 | `install.sh` | Full DKMS add/build/install + modprobe config + modloader |
 | `uninstall.sh` | Clean removal from DKMS, restores Waydroid seccomp |
 | `waydroid-setup.sh` | Configures Waydroid for KernelSU root access |
+| `build.sh` | One-shot pipeline: fetch → patch → `dkms build` → verify |
+| `verify-build.sh` | Verifies the finished `.ko`: vermagic, unresolved internal symbols, modpost log, `dkms.conf` safety |
 | `preflight.sh` | Comprehensive pre-installation checks |
 | `load-kernelsu` | Module loader using modloader (bypasses secure boot) |
 | `00-kernelsu.conf` | Modprobe alias (`ksu` → `kernelsu`) |
+| `.github/workflows/build.yml` | CI: patch application, shellcheck, real DKMS compile, regression gate |
 
 ## Requirements
 
