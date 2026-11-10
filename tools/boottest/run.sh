@@ -65,7 +65,10 @@ cp "$WORK/kernelsu.ko" "$IROOT/kernelsu.ko"
 ( cd "$IROOT" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "$WORK/initramfs.cpio.gz" )
 
 # 3. Boot it.  300s covers slow TCG emulation on CI runners without KVM.
-timeout 300 qemu-system-x86_64 -m 1024 -kernel "$WORK/vmlinuz" \
+# -cpu max: the host's busybox may be built for x86-64-v2/v3, while QEMU's
+# default qemu64 model lacks those instructions and init dies with an invalid
+# opcode before the module is ever touched.
+timeout 300 qemu-system-x86_64 -cpu max -m 1024 -kernel "$WORK/vmlinuz" \
   -initrd "$WORK/initramfs.cpio.gz" \
   -append "console=ttyS0 panic=-1 rdinit=/init" -nographic -no-reboot \
   > "$WORK/boot.log" 2>&1
