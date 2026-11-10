@@ -1,0 +1,30 @@
+From 4e86dd29abf0c0ce771ceca54268f4ce5ebe576b Mon Sep 17 00:00:00 2001
+From: z <x@y>
+Date: Tue, 10 Nov 2026 07:49:37 +0000
+Subject: [PATCH] core: keep the module unloadable on non-Android hosts
+
+---
+ kernel/core/init.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/core/init.c b/kernel/core/init.c
+index 0ca7529f..b6bfe953 100644
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -194,7 +194,15 @@ int __init kernelsu_init(void)
+     }
+ 
+ #ifdef MODULE
+-#ifndef CONFIG_KSU_DEBUG
++#if !defined(CONFIG_KSU_DEBUG) && !defined(CONFIG_KSU_NON_ANDROID)
++    /*
++     * Hides the module from /sys/module on Android, where it is never
++     * unloaded.  On a desktop host that mechanism is fatal: mod_sysfs_teardown()
++     * walks this same node during rmmod, so deleting it here leaves the kernel
++     * dereferencing a removed kernfs entry and it panics in
++     * kernfs_find_and_get_ns() with "kernfs: can not remove 'uevent', no
++     * directory".  DKMS modules must stay unloadable, so skip it.
++     */
+     kobject_del(&THIS_MODULE->mkobj.kobj);
+ #endif
+ #endif

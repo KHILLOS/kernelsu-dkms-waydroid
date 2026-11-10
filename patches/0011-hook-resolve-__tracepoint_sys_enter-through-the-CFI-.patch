@@ -1,0 +1,29 @@
+From d2591755d1e2f26ebadd0d638ceee869d6b5993a Mon Sep 17 00:00:00 2001
+From: z <x@y>
+Date: Tue, 10 Nov 2026 07:49:37 +0000
+Subject: [PATCH] hook: resolve __tracepoint_sys_enter through the CFI-aware
+ lookup
+
+---
+ kernel/hook/syscall_hook_manager.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/hook/syscall_hook_manager.c b/kernel/hook/syscall_hook_manager.c
+index 55d43c9e..a0c84bd8 100644
+--- a/kernel/hook/syscall_hook_manager.c
++++ b/kernel/hook/syscall_hook_manager.c
+@@ -152,8 +152,13 @@ void __init ksu_syscall_hook_manager_init(void)
+      * be used from a module.  Use the exported
+      * tracepoint_probe_register_prio() with the runtime-resolved tracepoint.
+      */
+-    ksu_sys_enter_tp = (struct tracepoint *)ksu_lookup_symbol_kprobe("__tracepoint_sys_enter");
++    ksu_sys_enter_tp = (struct tracepoint *)find_kernel_symbol_exact("__tracepoint_sys_enter");
+     if (!ksu_sys_enter_tp) {
++        /*
++         * The symbol may also carry a __data_loc suffix or be absent entirely
++         * when CONFIG_FTRACE_SYSCALLS is disabled; there is nothing to hook in
++         * that case, so this stays a warning rather than a failure.
++         */
+         pr_warn("hook_manager: __tracepoint_sys_enter not found, sys_enter hooking disabled\n");
+         ret = -ENOENT;
+     } else {

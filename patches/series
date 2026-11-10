@@ -7,3 +7,6 @@
 0007-vfs-make-the-anon-inode-wrapper-portable-across-6.1-.patch
 0008-supercall-resolve-free_pids-and-free_uid-at-runtime.patch
 0009-lsm-feature-detect-the-hook-storage-layout-instead-o.patch
+0010-core-keep-the-module-unloadable-on-non-Android-hosts.patch
+0011-hook-resolve-__tracepoint_sys_enter-through-the-CFI-.patch
+0012-kernel-build-and-load-on-5.4-through-7.3.patch

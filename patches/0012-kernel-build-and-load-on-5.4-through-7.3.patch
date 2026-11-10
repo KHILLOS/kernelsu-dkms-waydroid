@@ -1,0 +1,367 @@
+From aa578dc9192aba58c87a8ccc84b15ccab28d05ed Mon Sep 17 00:00:00 2001
+From: z <x@y>
+Date: Tue, 10 Nov 2026 07:49:37 +0000
+Subject: [PATCH] kernel: build and load on 5.4 through 7.3
+
+---
+ kernel/Kbuild                      | 13 +++++
+ kernel/feature/sucompat.c          |  5 ++
+ kernel/hook/syscall_event_bridge.c |  1 +
+ kernel/hook/x86_64/syscall_hook.c  |  1 +
+ kernel/include/ksu_compat.h        | 94 +++++++++++++++++++++++++++++-
+ kernel/infra/seccomp_cache.c       | 24 ++++++++
+ kernel/infra/symbol_resolver.c     |  1 +
+ kernel/policy/allowlist.c          | 10 ++++
+ kernel/policy/app_profile.c        |  3 +
+ kernel/sulog/event.c               |  5 ++
+ kernel/supercall/dispatch.c        |  2 +
+ kernel/supercall/supercall.c       |  6 ++
+ 12 files changed, 163 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index 3f4209db..3eab5b9f 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -164,6 +164,19 @@ $(info -- KernelSU: LSM layout: hook heads)
+ ifneq ($(KSU_LSM_HAS_LSMID),0)
+ ccflags-y += -DKSU_LSM_HOOK_HAS_LSMID=1
+ endif
++
++# close_fd() vs __close_fd(): the rename happened in 5.11 upstream, but stable
++# series (Debian's 5.10, for one) backported it, so ask Module.symvers which one
++# this kernel actually exports instead of trusting the version number.
++KSU_SYMVERS := $(firstword $(wildcard $(objtree)/Module.symvers $(srctree)/Module.symvers))
++ifneq ($(KSU_SYMVERS),)
++ifneq ($(shell grep -cE '(^|[^_a-zA-Z0-9])close_fd[[:space:]]' $(KSU_SYMVERS) 2>/dev/null),0)
++ccflags-y += -DCLOSE_FD_IS_EXPORTED=1
++$(info -- KernelSU: exported name close_fd)
++else
++$(info -- KernelSU: exported name __close_fd)
++endif
++endif
+ endif
+ 
+ obj-$(CONFIG_KSU) += kernelsu.o
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+index bd8e6b8e..ce40d2ad 100644
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -5,7 +5,12 @@
+ #include <linux/preempt.h>
+ #include <linux/printk.h>
+ #include <linux/mm.h>
++#include <linux/version.h>
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
+ #include <linux/pgtable.h>
++#else
++#include <asm/pgtable.h>
++#endif
+ #include <linux/uaccess.h>
+ #include <asm/current.h>
+ #include <linux/cred.h>
+diff --git a/kernel/hook/syscall_event_bridge.c b/kernel/hook/syscall_event_bridge.c
+index 9d2977f1..a2914a5d 100644
+--- a/kernel/hook/syscall_event_bridge.c
++++ b/kernel/hook/syscall_event_bridge.c
+@@ -8,6 +8,7 @@
+ #include <linux/static_key.h>
+ 
+ #include "arch.h"
++#include "ksu_compat.h" // __nocfi
+ #include "klog.h" // IWYU pragma: keep
+ #include "hook/tp_marker.h"
+ #include "feature/sucompat.h"
+diff --git a/kernel/hook/x86_64/syscall_hook.c b/kernel/hook/x86_64/syscall_hook.c
+index 1601efe6..8825928d 100644
+--- a/kernel/hook/x86_64/syscall_hook.c
++++ b/kernel/hook/x86_64/syscall_hook.c
+@@ -10,6 +10,7 @@
+ #include "../patch_memory.h"
+ #include "arch.h"
+ #include "klog.h" // IWYU pragma: keep
++#include "ksu_compat.h" // __nocfi
+ 
+ sys_call_ptr_t *ksu_syscall_table = NULL;
+ int ksu_dispatcher_nr = -1;
+diff --git a/kernel/include/ksu_compat.h b/kernel/include/ksu_compat.h
+index c513e2a4..017676d0 100644
+--- a/kernel/include/ksu_compat.h
++++ b/kernel/include/ksu_compat.h
+@@ -18,17 +18,75 @@
+ 
+ #include <linux/cred.h>
+ #include <linux/fs.h>
++#include <linux/fdtable.h> // files_struct, __close_fd
+ #include <linux/sched.h>
+ #include <linux/uaccess.h>
+ 
+ #include "infra/symbol_resolver.h"
+ 
++/*
++ * linux/pgtable.h appeared in 5.8; before that the same declarations live in
++ * asm/pgtable.h (and asm/pgalloc.h on some arches).  sucompat.c needs the page
++ * table types for its user-access helpers.
++ */
++#include <linux/version.h>
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
++#include <asm/pgtable.h>
++#endif
++
++/*
++ * __nocfi only exists in kernels built with CFI (and in Android's tree from
++ * 5.10 on).  Without it the syscall hook definitions do not parse at all on
++ * older kernels; the attribute is a no-op where CFI is not in use.
++ */
++#ifndef __nocfi
++#define __nocfi
++#endif
++
++/*
++ * CONFIG_SECCOMP_CACHE_DEBUG introduced struct action_cache (and with it the
++ * SECCOMP_ARCH_NATIVE_NR constant) in 5.15.  On older kernels the filter has no
++ * per-syscall action cache at all, so there is nothing for the module to patch.
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++#define KSU_HAVE_SECCOMP_ACTION_CACHE 1
++#endif
++
++/*
++ * struct seccomp grew filter_count in 5.10 (when filters became shareable).
++ * Before that the reference count lives only inside struct seccomp_filter.
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
++#define KSU_HAVE_SECCOMP_FILTER_COUNT 1
++#endif
++
+ /*
+  * close_fd() is exported and does exactly what __x64_sys_close() /
+  * __arm64_sys_close() do for a valid fd.  The __*_sys_* wrappers are not
+  * exported, so ksyscall(close, fd) cannot be linked into a module.
+  */
++/*
++ * The exported name is close_fd() from 5.11 on; older kernels export the
++ * identical helper as __close_fd().  Some stable series backported the rename
++ * without bumping the version, so Kbuild also probes Module.symvers and
++ * defines CLOSE_FD_IS_EXPORTED when close_fd() is what this kernel exports.
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+ extern int close_fd(unsigned int fd);
++#elif defined(CLOSE_FD_IS_EXPORTED)
++/*
++ * Debian's 5.10 stable series backported the rename, so the exported name is
++ * close_fd() even though the version is 5.10.
++ */
++extern int close_fd(unsigned int fd);
++#else
++extern int __close_fd(struct files_struct *files, unsigned int fd);
++static inline int ksu_close_fd_compat(unsigned int fd)
++{
++	return __close_fd(current->files, fd);
++}
++#define close_fd(fd) ksu_close_fd_compat(fd)
++#endif
+ 
+ /*
+  * strncpy_from_user_nofault() is not exported for modules.  The exported
+@@ -47,9 +105,41 @@ static inline long ksu_strncpy_from_user_nofault(char *dst, const void __user *s
+ #define strncpy_from_user_nofault(dst, src, count) ksu_strncpy_from_user_nofault(dst, src, count)
+ 
+ /*
+- * copy_to_kernel_nofault() is the unexported helper; the exported
+- * copy_from_kernel_nofault() performs the same kernel->kernel copy.
++ * copy_to_kernel_nofault() is the unexported helper; the exported inverse
++ * performs the same kernel->kernel copy.  The *_nofault names only exist from
++ * 5.8 on -- before that the pair was probe_kernel_read()/_write().
+  */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
+ #define copy_to_kernel_nofault(dst, src, size) copy_from_kernel_nofault(dst, src, size)
++#else
++#include <linux/uaccess.h>
++#define copy_to_kernel_nofault(dst, src, size) probe_kernel_read(dst, src, size)
++#endif
++
++/*
++ * The user-side nofault copy helpers also arrived in 5.8.  Their exported
++ * equivalents are the plain functions: callers run in process context with the
++ * right address space already active, so the "nofault" guarantee is not needed
++ * for correctness there, only for oops-avoidance on a bad pointer -- which
++ * access_ok() below still provides.
++ */
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
++static inline long ksu_copy_from_user_nofault(void *dst, const void __user *src, size_t size)
++{
++	if (unlikely(!access_ok(src, size)))
++		return -EFAULT;
++	return copy_from_user(dst, src, size);
++}
++
++static inline long ksu_copy_to_user_nofault(void __user *dst, const void *src, size_t size)
++{
++	if (unlikely(!access_ok(dst, size)))
++		return -EFAULT;
++	return copy_to_user(dst, src, size);
++}
++
++#define copy_from_user_nofault(dst, src, size) ksu_copy_from_user_nofault(dst, src, size)
++#define copy_to_user_nofault(dst, src, size) ksu_copy_to_user_nofault(dst, src, size)
++#endif
+ 
+ #endif /* __KSU_H_COMPAT */
+diff --git a/kernel/infra/seccomp_cache.c b/kernel/infra/seccomp_cache.c
+index a9d2b634..239de610 100644
+--- a/kernel/infra/seccomp_cache.c
++++ b/kernel/infra/seccomp_cache.c
+@@ -7,6 +7,28 @@
+ #include <linux/seccomp.h>
+ #include "klog.h" // IWYU pragma: keep
+ #include "infra/seccomp_cache.h"
++#include "ksu_compat.h"
++
++#ifndef KSU_HAVE_SECCOMP_ACTION_CACHE
++
++/*
++ * Kernels before 5.15 keep no per-syscall action cache in struct seccomp_filter,
++ * so the filter can never deny a syscall outright and there is nothing to
++ * clear.  Both entry points stay defined so callers link; they are no-ops.
++ */
++void ksu_seccomp_clear_cache(struct seccomp_filter *filter, int nr)
++{
++    (void)filter;
++    (void)nr;
++}
++
++void ksu_seccomp_allow_cache(struct seccomp_filter *filter, int nr)
++{
++    (void)filter;
++    (void)nr;
++}
++
++#else /* KSU_HAVE_SECCOMP_ACTION_CACHE */
+ 
+ struct action_cache {
+     DECLARE_BITMAP(allow_native, SECCOMP_ARCH_NATIVE_NR);
+@@ -63,3 +85,5 @@ void ksu_seccomp_allow_cache(struct seccomp_filter *filter, int nr)
+     }
+ #endif
+ }
++
++#endif /* KSU_HAVE_SECCOMP_ACTION_CACHE */
+diff --git a/kernel/infra/symbol_resolver.c b/kernel/infra/symbol_resolver.c
+index fae10c1d..51696b8d 100644
+--- a/kernel/infra/symbol_resolver.c
++++ b/kernel/infra/symbol_resolver.c
+@@ -29,6 +29,7 @@
+ #include <linux/version.h>
+ 
+ #include "infra/symbol_resolver.h"
++#include "ksu_compat.h" // __nocfi
+ #include "klog.h" // IWYU pragma: keep
+ 
+ /* A kprobe resolved by name needs a writable copy of the name. */
+diff --git a/kernel/policy/allowlist.c b/kernel/policy/allowlist.c
+index e5735d67..5e22ae58 100644
+--- a/kernel/policy/allowlist.c
++++ b/kernel/policy/allowlist.c
+@@ -3,6 +3,7 @@
+ #include <linux/rculist.h>
+ #include <linux/mutex.h>
+ #include <linux/task_work.h>
++#include <linux/sched/task.h> // TWA_RESUME, put_task_struct
+ #include <linux/capability.h>
+ #include <linux/compiler.h>
+ #include <linux/fs.h>
+@@ -478,7 +479,16 @@ void ksu_persistent_allow_list()
+         goto put_task;
+     }
+     cb->func = do_persistent_allow_list;
++    /*
++     * TWA_RESUME (and the enum task_work_notify_mode it belongs to) only exists
++     * from 5.10; on older kernels task_work_add() takes a plain "notify"
++     * boolean with the same meaning.
++     */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     if (task_work_add(tsk, cb, TWA_RESUME)) {
++#else
++    if (task_work_add(tsk, cb, true)) {
++#endif
+         kfree(cb);
+         pr_warn("save_allow_list add task_work failed\n");
+     }
+diff --git a/kernel/policy/app_profile.c b/kernel/policy/app_profile.c
+index 037483ed..c1f3ff69 100644
+--- a/kernel/policy/app_profile.c
++++ b/kernel/policy/app_profile.c
+@@ -18,6 +18,7 @@
+ #include "selinux/selinux.h"
+ #include "infra/su_mount_ns.h"
+ #include "hook/tp_marker.h"
++#include "ksu_compat.h"
+ 
+ /*
+  * seccomp_filter_release(), alloc_uid() and set_cred_ucounts() are internal
+@@ -134,7 +135,9 @@ static void disable_seccomp(void)
+ 
+     current->seccomp.mode = 0;
+     current->seccomp.filter = NULL;
++#ifdef KSU_HAVE_SECCOMP_FILTER_COUNT
+     atomic_set(&current->seccomp.filter_count, 0);
++#endif
+     spin_unlock_irq(&current->sighand->siglock);
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+diff --git a/kernel/sulog/event.c b/kernel/sulog/event.c
+index fcccbc2f..8256495d 100644
+--- a/kernel/sulog/event.c
++++ b/kernel/sulog/event.c
+@@ -1,8 +1,13 @@
++#include <linux/version.h>
+ #include <asm/current.h>
+ #include <linux/compat.h>
+ #include <linux/cred.h>
+ #include <linux/gfp.h>
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+ #include <linux/minmax.h>
++#else
++#include <linux/kernel.h> // min()/max() live here before 5.10
++#endif
+ #include <linux/overflow.h>
+ #include <linux/sched/signal.h>
+ #include <linux/slab.h>
+diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
+index 11ca446c..cfcd492b 100644
+--- a/kernel/supercall/dispatch.c
++++ b/kernel/supercall/dispatch.c
+@@ -4,6 +4,8 @@
+ #include <linux/uaccess.h>
+ #include <linux/version.h>
+ #include <linux/thread_info.h>
++#include <linux/sched/signal.h> // task_pgrp/task_session, struct pid
++#include <linux/init_task.h>  // init_task
+ #include "uapi/supercall.h"
+ #include "supercall/internal.h"
+ #include "arch.h" // IWYU pragma: keep
+diff --git a/kernel/supercall/supercall.c b/kernel/supercall/supercall.c
+index 6db26495..af93f541 100644
+--- a/kernel/supercall/supercall.c
++++ b/kernel/supercall/supercall.c
+@@ -10,6 +10,8 @@
+ #include <linux/task_work.h>
+ #include <linux/uaccess.h>
+ #include <linux/version.h>
++#include <linux/sched/task.h>
++#include "ksu_compat.h"
+ 
+ #include "uapi/supercall.h"
+ #include "supercall/internal.h"
+@@ -130,7 +132,11 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
+         tw->outp = (int __user *)arg4;
+         tw->cb.func = ksu_install_fd_tw_func;
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+         if (task_work_add(current, &tw->cb, TWA_RESUME)) {
++#else
++        if (task_work_add(current, &tw->cb, true)) {
++#endif
+             kfree(tw);
+             pr_warn("install fd add task_work failed\n");
+         }
