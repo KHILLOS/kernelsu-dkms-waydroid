@@ -232,6 +232,7 @@ jobs:
           fail() { echo "::error::$*"; exit 1; }
           case "$line" in *BUILD_FAIL*) fail "module did not build for this kernel";; esac
           case "$line" in *BOOT_TIMEOUT*) fail "guest never finished the test - QEMU hung or the kernel died";; esac
+          case "$line" in *NO_QEMU*|*QEMU_BROKEN*) fail "QEMU is unusable on this runner";; esac
           case "$line" in *"INSMOD=OK"*) ;; *) fail "module failed to load";; esac
           case "$line" in *"RMMOD=OK"*) ;; *) fail "module failed to unload";; esac
           case "$line" in *"errors_before=0"*) ;; *) fail "kernel logged an error while the module was loaded";; esac

@@ -68,6 +68,10 @@ cp "$WORK/kernelsu.ko" "$IROOT/kernelsu.ko"
 ( cd "$IROOT" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "$WORK/initramfs.cpio.gz" )
 
 # 3. Boot it.  300s covers slow TCG emulation on CI runners without KVM.
+command -v qemu-system-x86_64 >/dev/null || { echo "$IMG|$KV|NO_QEMU|qemu-system-x86_64 not installed"; exit 0; }
+# A missing machine description makes qemu exit 1 without writing anything; check
+# that it can at least describe the machine we are about to use.
+qemu-system-x86_64 -machine help >/dev/null 2>&1 || { echo "$IMG|$KV|QEMU_BROKEN|qemu-system-x86_64 cannot list machines"; exit 0; }
 # -cpu max: the host's busybox may be built for x86-64-v2/v3, while QEMU's
 # default qemu64 model lacks those instructions and init dies with an invalid
 # opcode before the module is ever touched.
