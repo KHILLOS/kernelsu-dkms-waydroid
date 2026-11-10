@@ -64,8 +64,11 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
+          # Distribution mirrors do transiently 404 mid-sync; without retries a
+          # single missing package fails the whole matrix entry for no reason.
+          APT="apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30"
+          $APT update
+          $APT install -y --no-install-recommends \
             build-essential dkms bc flex bison libelf-dev \
             kmod xz-utils zstd git ca-certificates
 
@@ -134,14 +137,17 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
+          # Distribution mirrors do transiently 404 mid-sync; without retries a
+          # single missing package fails the whole matrix entry for no reason.
+          APT="apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30"
+          $APT update
+          $APT install -y --no-install-recommends \
             build-essential dkms bc flex bison libelf-dev \
             kmod xz-utils zstd git ca-certificates
           # Debian tracks headers as linux-headers-amd64, Ubuntu as
           # linux-headers-generic.
-          apt-get install -y --no-install-recommends linux-headers-generic \
-            || apt-get install -y --no-install-recommends linux-headers-amd64
+          $APT install -y --no-install-recommends linux-headers-generic \
+            || $APT install -y --no-install-recommends linux-headers-amd64
 
       - name: Resolve target kernel
         run: |
@@ -210,6 +216,7 @@ jobs:
             qemu-system-x86 podman busybox-static cpio zstd xz-utils
 
       - name: Boot the kernel and load the module
+        timeout-minutes: 20
         env:
           PODMAN: podman
           WORKDIR: ${{ runner.temp }}/boottest
@@ -224,6 +231,7 @@ jobs:
           echo "result: $line"
           fail() { echo "::error::$*"; exit 1; }
           case "$line" in *BUILD_FAIL*) fail "module did not build for this kernel";; esac
+          case "$line" in *BOOT_TIMEOUT*) fail "guest never finished the test - QEMU hung or the kernel died";; esac
           case "$line" in *"INSMOD=OK"*) ;; *) fail "module failed to load";; esac
           case "$line" in *"RMMOD=OK"*) ;; *) fail "module failed to unload";; esac
           case "$line" in *"errors_before=0"*) ;; *) fail "kernel logged an error while the module was loaded";; esac

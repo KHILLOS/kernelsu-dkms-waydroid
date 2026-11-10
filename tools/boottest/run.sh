@@ -17,20 +17,21 @@ WORK=${WORKDIR:-/tmp/boottest}/$KV
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 # 1. Build the module against this kernel's real headers.
-$PODMAN run --rm --network=host -v "$SRC:/src:ro" -v "$WORK:/out:z" "$IMG" bash -c "
+$PODMAN run --rm --network=host --stop-timeout 30 -v "$SRC:/src:ro" -v "$WORK:/out:z" "$IMG" bash -c "
   # EOL releases only serve their old packages from the archive hosts; without
   # this the headers 404 and the build fails with a misleading error.
   if grep -qsE 'bullseye|buster' /etc/os-release && [ -f /etc/apt/sources.list ]; then
     sed -i 's|deb.debian.org|archive.debian.org|g; s|security.debian.org|archive.debian.org/debian-security|g' /etc/apt/sources.list
     echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check
   fi
-  apt-get update -qq >/dev/null 2>&1
+  APT="apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+  \$APT update -qq >/dev/null 2>&1
   # Debian packages the headers as *-amd64, Ubuntu as *-generic.  Try both, but
   # let the second apt run finish the job: a failing first attempt can leave apt's
   # lock/list state such that only a complete retry installs everything.
-  apt-get install -y --no-install-recommends build-essential libelf-dev bc flex bison \
+  \$APT install -y --no-install-recommends build-essential libelf-dev bc flex bison \
       kmod xz-utils zstd git ca-certificates linux-headers-generic linux-image-generic >/dev/null 2>&1 || \
-  apt-get install -y --no-install-recommends build-essential libelf-dev bc flex bison \
+  \$APT install -y --no-install-recommends build-essential libelf-dev bc flex bison \
       kmod xz-utils zstd git ca-certificates linux-headers-amd64 linux-image-amd64 >/dev/null 2>&1
   # Hard requirement: without these the build fails far from the real cause.
   for tool in make gcc git; do command -v \$tool >/dev/null || exit 15; done
@@ -50,8 +51,10 @@ $PODMAN run --rm --network=host -v "$SRC:/src:ro" -v "$WORK:/out:z" "$IMG" bash 
 " >/dev/null 2>&1
 RC=$?
 chmod -R a+rX "$WORK" 2>/dev/null || sudo chmod -R a+rX "$WORK"
-if [ $RC -ne 0 ]; then
-  echo "$IMG|$KV|BUILD_FAIL($RC)|$(grep -E 'error:|ERROR: modpost' "$WORK/build.log" 2>/dev/null | head -2 | tr '\n' ' ')"
+# A missing artifact means the container failed somewhere along the way (build,
+# fetch, or apt); report it as such rather than as a boot timeout.
+if [ $RC -ne 0 ] || [ ! -f "$WORK/kernelsu.ko" ] || [ ! -f "$WORK/vmlinuz" ]; then
+  echo "$IMG|$KV|BUILD_FAIL($RC)|$(grep -hE 'error:|ERROR: modpost|E: ' "$WORK/build.log" "$WORK/fetch.log" 2>/dev/null | head -2 | tr '\n' ' ')"
   exit 0
 fi
 
@@ -72,6 +75,14 @@ timeout 300 qemu-system-x86_64 -cpu max -m 1024 -kernel "$WORK/vmlinuz" \
   -initrd "$WORK/initramfs.cpio.gz" \
   -append "console=ttyS0 panic=-1 rdinit=/init" -nographic -no-reboot \
   > "$WORK/boot.log" 2>&1
+QEMU_RC=$?
+
+# A timeout is a failure, not an empty result: report it as such so the job ends
+# quickly instead of leaving a half-finished line behind.
+if [ $QEMU_RC -eq 124 ] || ! grep -qa "^${MARKER} DONE" "$WORK/boot.log"; then
+  echo "$IMG|$KV|BOOT_TIMEOUT|guest never reached the end of the test (qemu rc=$QEMU_RC)"
+  exit 0
+fi
 
 R=$(grep -a "^${MARKER} " "$WORK/boot.log" | sed "s/^[^ ]* //; s/\r$//")
 g() { echo "$R" | grep -oP "$1=\K\w+"; }
