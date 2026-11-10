@@ -17,38 +17,48 @@ WORK=${WORKDIR:-/tmp/boottest}/$KV
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 # 1. Build the module against this kernel's real headers.
-$PODMAN run --rm --network=host --stop-timeout 30 -v "$SRC:/src:ro" -v "$WORK:/out:z" "$IMG" bash -c "
-  # EOL releases only serve their old packages from the archive hosts; without
-  # this the headers 404 and the build fails with a misleading error.
-  if grep -qsE 'bullseye|buster' /etc/os-release && [ -f /etc/apt/sources.list ]; then
-    sed -i 's|deb.debian.org|archive.debian.org|g; s|security.debian.org|archive.debian.org/debian-security|g' /etc/apt/sources.list
-    echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check
-  fi
-  APT="apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
-  \$APT update -qq >/dev/null 2>&1
-  # Debian packages the headers as *-amd64, Ubuntu as *-generic.  Try both, but
-  # let the second apt run finish the job: a failing first attempt can leave apt's
-  # lock/list state such that only a complete retry installs everything.
-  \$APT install -y --no-install-recommends build-essential libelf-dev bc flex bison \
-      kmod xz-utils zstd git ca-certificates linux-headers-generic linux-image-generic >/dev/null 2>&1 || \
-  \$APT install -y --no-install-recommends build-essential libelf-dev bc flex bison \
-      kmod xz-utils zstd git ca-certificates linux-headers-amd64 linux-image-amd64 >/dev/null 2>&1
-  # Hard requirement: without these the build fails far from the real cause.
-  for tool in make gcc git; do command -v \$tool >/dev/null || exit 15; done
-  cp -r /src /work && cd /work || exit 11
-  # The repository does not ship the KernelSU sources: fetch the pinned commit and
-  # apply patches/series, exactly like build.sh does.
-  # fetch-kernelsu.sh installs the patched tree into /usr/src/kernelsu-<ver>,
-  # flattened: that directory is itself the kernel module directory.
-  ./fetch-kernelsu.sh >/out/fetch.log 2>&1 || exit 14
-  cd /usr/src/kernelsu-* || exit 11
-  test -f Kbuild || exit 16
-  make -C /usr/src/linux-headers-$KV M=\$PWD CONFIG_KSU=m KSU_GIT_VERSION=2680 \
-        CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y CONFIG_KSU_NON_ANDROID=y \
-        CONFIG_KSU_SELINUX=n CONFIG_KSU_DISABLE_MANAGER=y modules >/out/build.log 2>&1 || exit 12
-  cp kernelsu.ko /out/kernelsu.ko || exit 17
-  cp /boot/vmlinuz-$KV /out/vmlinuz || exit 13
-" > "$WORK/container.log" 2>&1
+#
+# The build steps live in a generated script that is mounted into the container
+# rather than in a nested `bash -c "..."` string: escaping $APT/$KV/$PWD through
+# two levels of quoting silently produced a container that pulled the image and
+# exited 0 without running anything.
+cat > "$WORK/build-in-container.sh" <<CONTAINER_SCRIPT
+#!/bin/bash
+KV="$KV"
+set -x
+# EOL releases only serve their old packages from the archive hosts.
+if grep -qsE 'bullseye|buster' /etc/os-release && [ -f /etc/apt/sources.list ]; then
+  sed -i 's|deb.debian.org|archive.debian.org|g; s|security.debian.org|archive.debian.org/debian-security|g' /etc/apt/sources.list
+  echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check
+fi
+APT="apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30"
+\$APT update -qq || exit 20
+# Debian packages the headers as *-amd64, Ubuntu as *-generic.
+\$APT install -y --no-install-recommends build-essential libelf-dev bc flex bison \
+    kmod xz-utils zstd git ca-certificates linux-headers-generic linux-image-generic \
+  || \$APT install -y --no-install-recommends build-essential libelf-dev bc flex bison \
+    kmod xz-utils zstd git ca-certificates linux-headers-amd64 linux-image-amd64 \
+  || exit 21
+for tool in make gcc git; do command -v \$tool >/dev/null || exit 15; done
+# Work on a copy: /src is mounted read-only.
+cp -r /src /work || exit 11
+# The repository ships no KernelSU sources: fetch the pinned commit and patch it.
+cd /work || exit 11
+./fetch-kernelsu.sh > /out/fetch.log 2>&1 || exit 14
+# fetch-kernelsu.sh flattens the module tree into /usr/src/kernelsu-<version>.
+cd /usr/src/kernelsu-* || exit 11
+test -f Kbuild || exit 16
+make -C /usr/src/linux-headers-\$KV M=\$PWD CONFIG_KSU=m KSU_GIT_VERSION=2680 \
+     CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y CONFIG_KSU_NON_ANDROID=y \
+     CONFIG_KSU_SELINUX=n CONFIG_KSU_DISABLE_MANAGER=y modules > /out/build.log 2>&1 || exit 12
+cp kernelsu.ko /out/kernelsu.ko || exit 17
+cp /boot/vmlinuz-\$KV /out/vmlinuz || exit 13
+CONTAINER_SCRIPT
+chmod +x "$WORK/build-in-container.sh"
+
+$PODMAN run --rm --network=host --stop-timeout 30 \
+  -v "$SRC:/src:ro" -v "$WORK:/out:z" "$IMG" \
+  bash /out/build-in-container.sh > "$WORK/container.log" 2>&1
 RC=$?
 chmod -R a+rX "$WORK" 2>/dev/null || sudo chmod -R a+rX "$WORK"
 # A missing artifact means the container failed somewhere along the way (build,
