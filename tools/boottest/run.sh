@@ -46,15 +46,17 @@ $PODMAN run --rm --network=host --stop-timeout 30 -v "$SRC:/src:ro" -v "$WORK:/o
   make -C /usr/src/linux-headers-$KV M=\$PWD CONFIG_KSU=m KSU_GIT_VERSION=2680 \
         CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y CONFIG_KSU_NON_ANDROID=y \
         CONFIG_KSU_SELINUX=n CONFIG_KSU_DISABLE_MANAGER=y modules >/out/build.log 2>&1 || exit 12
-  cp kernelsu.ko /out/kernelsu.ko
+  cp kernelsu.ko /out/kernelsu.ko || exit 17
   cp /boot/vmlinuz-$KV /out/vmlinuz || exit 13
-" >/dev/null 2>&1
+" > "$WORK/container.log" 2>&1
 RC=$?
 chmod -R a+rX "$WORK" 2>/dev/null || sudo chmod -R a+rX "$WORK"
 # A missing artifact means the container failed somewhere along the way (build,
 # fetch, or apt); report it as such rather than as a boot timeout.
 if [ $RC -ne 0 ] || [ ! -f "$WORK/kernelsu.ko" ] || [ ! -f "$WORK/vmlinuz" ]; then
-  echo "$IMG|$KV|BUILD_FAIL($RC)|$(grep -hE 'error:|ERROR: modpost|E: ' "$WORK/build.log" "$WORK/fetch.log" 2>/dev/null | head -2 | tr '\n' ' ')"
+  detail=$(grep -hE 'error:|ERROR: modpost|E: |Error:' "$WORK/build.log" "$WORK/fetch.log" "$WORK/container.log" 2>/dev/null | head -2 | tr '\n' ' ')
+  [ -z "$detail" ] && detail="RC=$RC; files: $(ls "$WORK" 2>/dev/null | tr '\n' ' '); last: $(tail -2 "$WORK/container.log" 2>/dev/null | tr '\n' ' ')"
+  echo "$IMG|$KV|BUILD_FAIL($RC)|$detail"
   exit 0
 fi
 
