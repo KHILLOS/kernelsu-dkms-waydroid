@@ -1,0 +1,32 @@
+#!/bin/busybox sh
+TAG=@@TAG@@
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+echo "$TAG ===== kernel=$(uname -r) ====="
+LOADED=0
+echo "$TAG --- insmod ---"
+if insmod /kernelsu.ko; then
+  LOADED=1
+  echo "$TAG INSMOD=OK"
+  sleep 2
+  grep -q kernelsu /proc/modules && echo "$TAG MODULE_LISTED=YES" || echo "$TAG MODULE_LISTED=NO"
+else
+  echo "$TAG INSMOD=FAILED"
+fi
+echo "$TAG --- init messages ---"
+dmesg | grep -i "kernelsu" | sed "s/^/$TAG  DMESG| /" | tail -40
+echo "$TAG --- kernel errors ---"
+ERRS=$(dmesg | grep -iE "call trace|bug: |oops|unable to handle|general protection|kernel panic" | grep -vc "Command line")
+echo "$TAG ERROR_LINES=$ERRS"
+if [ "$LOADED" = "1" ]; then
+  echo "$TAG --- rmmod ---"
+  if rmmod kernelsu; then echo "$TAG RMMOD=OK"; else echo "$TAG RMMOD=FAILED"; fi
+  sleep 1
+  ERRS2=$(dmesg | grep -iE "call trace|bug: |oops|unable to handle|general protection|kernel panic" | grep -vc "Command line")
+  echo "$TAG ERROR_LINES_AFTER_UNLOAD=$ERRS2"
+  grep -q kernelsu /proc/modules && echo "$TAG UNLOAD_LEFTOVER=YES" || echo "$TAG UNLOAD_LEFTOVER=NO"
+fi
+echo "$TAG DONE"
+poweroff -f
