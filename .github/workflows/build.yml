@@ -121,12 +121,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: ubuntu:22.04
-            note: 5.15 (hook heads, lsmid backport)
-          - image: debian:12
-            note: 6.1 (hook heads)
-          - image: ubuntu:24.04
-            note: 6.8 (hook heads, lsmid)
+          # Latest kernels only.
           - image: debian:13
             note: 6.12 (static calls)
           - image: ubuntu:25.10
@@ -183,6 +178,66 @@ jobs:
         with:
           name: kernelsu-ko-${{ env.BUILD_KERNEL }}
           path: /tmp/kernelsu.ko
+          retention-days: 14
+
+  # Boot test: compile + link is not enough.  This job boots each distribution's
+  # own kernel in QEMU and runs insmod/rmmod on the real thing, because KernelSU
+  # patches syscall tables at init time and a bug there is a panic, not a build
+  # error.  It is what caught the kobject_del() panic that used to take the host
+  # down during install.sh's own load test.
+  boot-test:
+    runs-on: ubuntu-latest
+    needs: patches
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Latest kernels only: these are the ones users actually run, and the
+          # ones where upstream churn keeps breaking the module.
+          - image: debian:13
+            kernel: 6.12.116+deb13-amd64
+          - image: ubuntu:25.10
+            kernel: 6.17.0-41-generic
+          - image: ubuntu:26.04
+            kernel: 7.0.0-43-generic
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU and podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 podman busybox-static cpio zstd xz-utils
+
+      - name: Boot the kernel and load the module
+        env:
+          PODMAN: podman
+          WORKDIR: ${{ runner.temp }}/boottest
+        run: |
+          chmod +x tools/boottest/run.sh
+          tools/boottest/run.sh "${{ matrix.image }}" "${{ matrix.kernel }}" \
+            | tee result.txt
+
+      - name: Assert the module loaded and unloaded cleanly
+        run: |
+          line=$(cat result.txt)
+          echo "result: $line"
+          fail() { echo "::error::$*"; exit 1; }
+          case "$line" in *BUILD_FAIL*) fail "module did not build for this kernel";; esac
+          case "$line" in *"INSMOD=OK"*) ;; *) fail "module failed to load";; esac
+          case "$line" in *"RMMOD=OK"*) ;; *) fail "module failed to unload";; esac
+          case "$line" in *"errors_before=0"*) ;; *) fail "kernel logged an error while the module was loaded";; esac
+          case "$line" in *"errors_after=0"*) ;; *) fail "unloading the module left the kernel in an error state";; esac
+          case "$line" in *"leftover=NO"*) ;; *) fail "module is still resident after rmmod";; esac
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-log-${{ matrix.kernel }}
+          path: |
+            result.txt
+            ${{ runner.temp }}/boottest/**/boot.log
           retention-days: 14
 
   # Negative test: the old configuration must be rejected by verify-build.sh.
