@@ -104,20 +104,45 @@ install -Dm644 "${SCRIPT_DIR}/00-kernelsu.conf" /etc/modprobe.d/00-kernelsu.conf
 log_info "Installing load script..."
 install -Dm755 "${SCRIPT_DIR}/load-kernelsu" /usr/bin/load-kernelsu
 
-# Install modloader if available
+# Install modloader.
+#
+# modloader is a third-party binary that gets root and loads code into the
+# kernel, so it is pinned by SHA-256: a compromised or silently re-uploaded
+# release asset fails the check instead of being installed.  Set
+# KSU_SKIP_MODLOADER_CHECKSUM=1 only if you have verified the file yourself.
+MODLOADER_URL="https://github.com/shadichy/modloader/releases/download/v2.0.0/modloader-x86_64-glibc"
+MODLOADER_SHA256="5d1aaa5291326698221c647a04ae227ee036d25a2429d65efefe27e84df2533a"
+
 if [ -f "${SCRIPT_DIR}/modloader" ]; then
-    log_info "Installing modloader..."
-    install -Dm755 "${SCRIPT_DIR}/modloader" /usr/bin/modloader
+    log_info "Installing bundled modloader..."
+    MODLOADER_SRC="${SCRIPT_DIR}/modloader"
 else
-    log_warn "modloader not found - downloading..."
-    MODLOADER_URL="https://github.com/shadichy/modloader/releases/download/v2.0.0/modloader-x86_64-glibc"
-    if ! curl -fL --retry 3 -o /tmp/modloader "${MODLOADER_URL}"; then
+    log_info "Downloading modloader..."
+    MODLOADER_SRC=/tmp/modloader
+    if ! curl -fL --retry 3 --proto '=https' -o "${MODLOADER_SRC}" "${MODLOADER_URL}"; then
         log_err "Failed to download modloader from ${MODLOADER_URL}"
-        log_err "Download it manually and place it at ${SCRIPT_DIR}/modloader, then re-run."
+        log_err "Download it manually, verify it, place it at ${SCRIPT_DIR}/modloader, and re-run."
         exit 1
     fi
-    install -Dm755 /tmp/modloader /usr/bin/modloader
 fi
+
+if [ "${KSU_SKIP_MODLOADER_CHECKSUM:-0}" = "1" ]; then
+    log_warn "Skipping modloader checksum verification (KSU_SKIP_MODLOADER_CHECKSUM=1)"
+else
+    ACTUAL=$(sha256sum "${MODLOADER_SRC}" | cut -d' ' -f1)
+    if [ "${ACTUAL}" != "${MODLOADER_SHA256}" ]; then
+        log_err "modloader checksum mismatch - refusing to install it."
+        log_err "  expected: ${MODLOADER_SHA256}"
+        log_err "  actual:   ${ACTUAL}"
+        log_err "The download may be corrupt, or the release asset was replaced."
+        log_err "Re-run, or supply your own verified binary at ${SCRIPT_DIR}/modloader."
+        rm -f "${MODLOADER_SRC}"
+        exit 1
+    fi
+    log_ok "modloader checksum verified"
+fi
+
+install -Dm755 "${MODLOADER_SRC}" /usr/bin/modloader
 
 # Update module dependencies
 log_info "Updating module dependencies..."
