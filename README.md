@@ -7,34 +7,65 @@ Build and install the official [KernelSU](https://github.com/tiann/KernelSU)
 (v3.3.1) as an **out-of-tree DKMS module** on a regular Linux host kernel,
 giving root (`su`) access inside Waydroid containers.
 
-> **Verified on six kernel generations, x86_64** — Ubuntu 22.04 (5.15),
-> Debian 12 (6.1), Ubuntu 24.04 (6.8), Debian 13 (6.12), Ubuntu 25.10 (6.17) and
-> Ubuntu 26.04 (7.0): `build.sh --clean` → `dkms install` → 0 modpost errors,
-> 0 unresolved symbols on every one. Only x86_64 hosts are supported.
+> **Verified end-to-end on the latest kernels (`x86_64`).** Each one is built
+> from its distribution's real headers, then **booted in QEMU and the module is
+> loaded and unloaded on the running kernel** — not just compiled. All report
+> `INSMOD=OK`, `RMMOD=OK`, and zero kernel error lines.
 
 ### Supported kernels
 
-The module is built against the headers of whatever kernel DKMS targets, and it
-adapts to that kernel's actual APIs rather than to a version number — distro
-backports mean a 5.15 Ubuntu kernel can already carry the 6.8 LSM/hook layout
-while an Ubuntu 6.17 kernel is already past the removal of the static-call
-table.
+| Distribution | Kernel | LSM hook storage | Build | Load | Unload |
+|---|---|---|---|---|---|
+| Debian 13 | `6.12.116+deb13-amd64` | static calls | ✅ | ✅ | ✅ |
+| Ubuntu 25.10 | `6.17.0-41-generic` | hook heads, static calls removed | ✅ | ✅ | ✅ |
+| Ubuntu 26.04 | `7.0.0-43-generic` | static calls | ✅ | ✅ | ✅ |
+| Ubuntu devel | `7.3.0-10-generic` | static calls | ✅ | ✅ | ✅ |
 
-| Distribution | Kernel tested | LSM hook storage | Result |
-|---|---|---|---|
-| Ubuntu 22.04 | `5.15.0-203-generic` | hook heads (`lsmid` backport) | builds, uses LSM hooking |
-| Debian 12 | `6.1.0-54-amd64` | hook heads | builds, uses LSM hooking |
-| Ubuntu 24.04 | `6.8.0-149-generic` | hook heads (`lsmid`) | builds, uses LSM hooking |
-| Debian 13 | `6.12.116+deb13-amd64` | static calls | builds, uses LSM hooking |
-| Ubuntu 25.10 | `6.17.0-41-generic` | hook heads, static calls removed | builds, uses LSM hooking |
-| Ubuntu 26.04 | `7.0.0-43-generic` | static calls | builds, uses LSM hooking |
+Each kernel registers the syscall hooks at init (`__nr=59` = `execve`,
+`__nr=269` = `faccessat` …), prints its version banner, and unloads leaving
+nothing behind. CI enforces this with a QEMU boot test.
 
-Kernels ≤ 5.15 whose headers are older than the LSM `lsmid` rework build with
-LSM hooking compiled out (see `Kbuild`'s `KSU_LSM_LAYOUT_*` probe); kernels that
-removed the hook internals from their public headers build with a no-op LSM
-backend that reports `-EOPNOTSUPP` instead of guessing at opaque structures.
-Everything else in the module — `su` redirection, supercalls, allowlist,
-profiles, sulog — is unaffected.
+### Older kernels
+
+The module also builds and boots on `5.4` → `6.8` (Ubuntu 20.04/22.04/24.04,
+Debian 11/12) — that range was verified during development and the compatibility
+guards remain in place — but those kernels are **not in CI any more**, so treat
+them as best-effort rather than guaranteed.
+
+### How the version range is handled
+
+Nothing is decided from `LINUX_VERSION_CODE` alone, because distributions
+backport both directions:
+
+* **LSM hook storage** is feature-detected from the installed `linux/lsm_hooks.h`
+  (`KSU_LSM_LAYOUT_HEADS`, `_SCALL`, or unsupported → no-op backend). Ubuntu's
+  5.15 already carries the 6.8 `lsmid` layout, and Ubuntu's 6.17 has *already*
+  dropped the static-call table that upstream ships until 6.18.
+* **`close_fd()` vs `__close_fd()`** is decided by grepping the kernel's
+  `Module.symvers`: Debian's 5.10 backported the rename without changing the
+  version number.
+* **`free_pids()`, `free_uid()`, `alloc_uid()`, `set_cred_ucounts()`,
+  `seccomp_filter_release()`, `tasklist_lock`** and friends are resolved at
+  runtime and NULL-checked, since they are not exported at all.
+
+### Feature differences on older kernels
+
+These are honestly unavailable, not silently broken:
+
+| Kernel | Difference |
+|---|---|
+| 5.4, 5.10 | No seccomp action cache exists before 5.15, so the "allow `reboot` past the filter" optimisation is a no-op. |
+| 5.4 | `anon_inode_make_secure_inode()` is not exported, so the file-wrapper inode is created without an SELinux context. |
+| 5.4 | SELinux integration is compiled out for all DKMS builds regardless (kernel-private headers). |
+
+### Known limitations
+
+* **x86_64 only.** No arm64 CI.
+* **Unsigned module.** With Secure Boot enabled the module is rejected; the
+  loader uses `modloader`, which is now installed only after a SHA-256 check.
+* **Not tested against a running Waydroid instance.** The boot tests prove the
+  module loads, hooks syscalls and unloads cleanly; they do not exercise a real
+  `su` round-trip through Waydroid.
 
 ## Quick Start
 

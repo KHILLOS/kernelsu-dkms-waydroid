@@ -252,6 +252,55 @@ headers, through `build.sh`, not just `make modules`.
 
 ---
 
+## Verified Kernel Range (measured 2026-11-10)
+
+Each kernel was built from its distribution's headers **and then booted in QEMU
+with the module loaded and unloaded on the running kernel**
+(`tools/boottest/run.sh`).
+
+In CI (latest kernels only):
+
+| Kernel | Boot | Load | Unload | Kernel error lines |
+|---|---|---|---|---|
+| 6.12.116+deb13-amd64 | ✅ | ✅ | ✅ | 0 |
+| 6.17.0-41-generic | ✅ | ✅ | ✅ | 0 |
+| 7.0.0-43-generic | ✅ | ✅ | ✅ | 0 |
+| 7.3.0-10-generic | ✅ | ✅ | ✅ | 0 |
+
+Also verified during development but no longer in CI (best-effort): 5.4.0-216,
+5.10.0-46, 5.15.0-203, 6.1.0-54, 6.8.0-149 — all loaded and unloaded cleanly.
+
+### Why boot tests exist
+
+Compiling and link-checking proves a module **links**. KernelSU patches syscall
+tables and kernel text at init, so a mistake there is a panic inside `insmod`
+or `rmmod` — invisible to every build-time check. The very first boot test found
+a real crash (see below), which no amount of static verification would have
+caught.
+
+### Symptom → cause → fix, round two
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `rmmod` panics: `kernfs: can not remove 'uevent', no directory` then NULL deref in `kernfs_find_and_get_ns` | `kobject_del(&THIS_MODULE->mkobj.kobj)` in `kernelsu_init()` removes the sysfs node that `mod_sysfs_teardown()` later walks | skip it unless building for Android (patch 0010) |
+| 5.4: `linux/pgtable.h: No such file`, `__nocfi` parse errors, `TWA_RESUME` undeclared, `minmax.h` missing | all five post-date 5.4 | version-guarded includes + compat shims (patch 0012) |
+| 5.4: `"close_fd" undefined`; 5.10: `"__close_fd" undefined` | the symbol was renamed in 5.11, and Debian's 5.10 backported the rename | probe `Module.symvers` for the exported name instead of guessing (patch 0012) |
+| 5.4: `struct seccomp has no member filter_count`, `SECCOMP_ARCH_NATIVE_NR undeclared` | `filter_count` arrived in 5.10, the action cache in 5.15 | gate both; the seccomp-cache helpers become no-ops below 5.15 |
+
+### Decisions
+
+- **`KSU_NON_ANDROID` gates anti-detection, not just configuration.** Hiding the
+  module from `/sys/module` is an Android-only trick that makes the module
+  un-unloadable, which is incompatible with DKMS by definition.
+- **A missing optimisation is logged, not faked.** Below 5.15 the seccomp cache
+  helpers compile to no-ops and say so, rather than pretending to patch a
+  structure that does not exist.
+- **Third-party binaries are pinned.** `modloader` is checked against a SHA-256
+  before being installed to `/usr/bin`, with an explicit opt-out for people who
+  supply their own verified copy.
+
+---
+
 ## Future Considerations
 
 1. **Upstream Patches**: Submit 0001 and 0002 to tiann/KernelSU for official Waydroid support

@@ -11,6 +11,26 @@ Upstream base: [tiann/KernelSU](https://github.com/tiann/KernelSU) `v3.3.1`
 
 ### Fixed
 
+- **CRITICAL: the module panicked the host on unload.** `kernelsu_init()` called
+  `kobject_del(&THIS_MODULE->mkobj.kobj)` to hide the module from `/sys/module`
+  on Android, where it is never removed. On a desktop host `mod_sysfs_teardown()`
+  walks that same node during `rmmod`, so the kernel died with
+  `kernelsu_init() -> kobject_del -> kernfs: can not remove 'uevent', no directory`
+  followed by a NULL dereference in `kernfs_find_and_get_ns()`. `install.sh`
+  performs exactly that load/unload cycle as its own install test, so installing
+  could crash the machine. Now compiled out for non-Android builds.
+- **Older-kernel compatibility (5.4 – 6.8)**: `__nocfi`, `linux/pgtable.h`, the `*_nofault` copy helpers,
+  `linux/minmax.h`, `TWA_RESUME`/`task_work_add()`, `struct seccomp.filter_count`
+  and the `struct action_cache` API all post-date 5.4 and are now guarded. These
+  kernels are no longer in CI, so this range is best-effort.
+- **`close_fd()` vs `__close_fd()`** is probed from `Module.symvers`. Debian's
+  5.10 backported the rename, so a version check picked the wrong symbol and
+  modpost failed with `"__close_fd" undefined`.
+- **Boot tests**: the module now loads *and unloads* cleanly on a real running
+  kernel for every claimed version, verified in QEMU by CI.
+- **modloader download is pinned by SHA-256.** It is a third-party binary that
+  runs as root and loads into the kernel; it was previously fetched over the
+  network with no integrity check at all.
 - **Six-kernel support.** The module now builds and passes linkage
   verification against Ubuntu 22.04 (5.15), Debian 12 (6.1), Ubuntu 24.04
   (6.8), Debian 13 (6.12), Ubuntu 25.10 (6.17) and Ubuntu 26.04 (7.0).  A
